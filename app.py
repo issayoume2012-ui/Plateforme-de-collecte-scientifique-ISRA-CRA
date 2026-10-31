@@ -203,9 +203,9 @@ create or replace function public.cra_audit_records_trigger()
 returns trigger language plpgsql security definer set search_path=public as $$
 declare old_payload jsonb; new_payload jsonb; rec_id text; tbl text; op text;
 begin
- if TG_OP='DELETE' then old_payload:=OLD.payload; rec_id:=OLD.id; tbl:=OLD.table_name; op:='DELETE';
- elsif TG_OP='UPDATE' then old_payload:=OLD.payload; new_payload:=NEW.payload; rec_id:=NEW.id; tbl:=NEW.table_name; op:='UPDATE';
- else new_payload:=NEW.payload; rec_id:=NEW.id; tbl:=NEW.table_name; op:='INSERT'; end if;
+ if TG_OP='DELETE' then old_payload:=OLD.payload; rec_id:=OLD.id; tbl:=TG_TABLE_NAME; op:='DELETE';
+ elsif TG_OP='UPDATE' then old_payload:=OLD.payload; new_payload:=NEW.payload; rec_id:=NEW.id; tbl:=TG_TABLE_NAME; op:='UPDATE';
+ else new_payload:=NEW.payload; rec_id:=NEW.id; tbl:=TG_TABLE_NAME; op:='INSERT'; end if;
  insert into public.cra_audit_log(actor_email,action,table_name,record_id,before_data,after_data,event_at)
  values (coalesce(nullif(current_setting('request.jwt.claim.email',true),''),current_user),op,tbl,rec_id,old_payload,new_payload,now());
  if TG_OP='DELETE' then return OLD; else return NEW; end if;
@@ -214,30 +214,11 @@ drop trigger if exists cra_records_audit on public.cra_records;
 create trigger cra_records_audit after insert or update or delete on public.cra_records
 for each row execute function public.cra_audit_records_trigger();
 
--- Tables métier physiques : chaque table est une table PostgreSQL distincte.
--- Elles héritent de cra_records pour conserver le format JSONB utilisé par
--- l'adaptateur applicatif sans modifier les écrans ni les fonctions métier.
--- Les anciennes lignes stockées dans cra_records sont déplacées automatiquement.
-create or replace function public.cra_route_record_insert()
-returns trigger language plpgsql security definer set search_path=public as $$
-begin
-  if new.table_name = any (array[
-    'cra_collaboration','cra_culture_folders','cra_cultures','cra_forms',
-    'cra_measurement_drafts','cra_measurement_sheets',
-    'cra_phytosanitary_diagnostics','cra_responses','cra_technical_sheets',
-    'cra_trial_observations','cra_trials'
-  ]) then
-    execute format(
-      'insert into public.%I (table_name,id,owner_email,payload,created_at) values ($1,$2,$3,$4,$5)',
-      new.table_name
-    ) using new.table_name,new.id,new.owner_email,new.payload,new.created_at;
-    return null;
-  end if;
-  return new;
-end; $$;
-
+-- Tables métier autonomes : tables PostgreSQL classiques, sans INHERITS.
+-- Chaque module possède sa propre table avec id, propriétaire, données JSONB et date.
+-- Les données historiques sont copiées depuis cra_records sans les supprimer.
 do $$
-declare t text;
+declare t text; c record;
 begin
   foreach t in array array[
     'cra_collaboration','cra_culture_folders','cra_cultures','cra_forms',
@@ -245,47 +226,61 @@ begin
     'cra_phytosanitary_diagnostics','cra_responses','cra_technical_sheets',
     'cra_trial_observations','cra_trials'
   ] loop
+    -- Convertit les anciennes tables héritées créées par les versions précédentes.
+    if to_regclass(format('public.%I', t)) is not null and exists (
+      select 1 from pg_inherits i
+      where i.inhrelid = to_regclass(format('public.%I', t))
+        and i.inhparent = 'public.cra_records'::regclass
+    ) then
+      execute format('drop index if exists public.%I', t || '_table_id_uidx');
+      execute format('alter table public.%I no inherit public.cra_records', t);
+      for c in
+        select conname from pg_constraint
+        where conrelid = to_regclass(format('public.%I', t)) and contype = 'c'
+      loop
+        execute format('alter table public.%I drop constraint %I', t, c.conname);
+      end loop;
+      if exists (
+        select 1 from information_schema.columns
+        where table_schema='public' and table_name=t and column_name='table_name'
+      ) then
+        execute format('alter table public.%I drop column table_name', t);
+      end if;
+      if not exists (
+        select 1 from pg_constraint
+        where conrelid=to_regclass(format('public.%I', t)) and contype='p'
+      ) then
+        execute format('alter table public.%I add constraint %I primary key (id)', t, t || '_pkey');
+      end if;
+    end if;
+
     execute format(
-      'create table if not exists public.%I (check (table_name = %L)) inherits (public.cra_records)',
-      t,t
+      'create table if not exists public.%I (' ||
+      'id text primary key, owner_email text not null default %L, ' ||
+      'payload jsonb not null, created_at timestamptz not null default now())',
+      t, ''
     );
-    execute format('create unique index if not exists %I on public.%I (table_name,id)', t || '_table_id_uidx', t);
     execute format('create index if not exists %I on public.%I (owner_email)', t || '_owner_idx', t);
+    execute format('create index if not exists %I on public.%I (created_at desc)', t || '_created_idx', t);
     execute format('create index if not exists %I on public.%I using gin(payload)', t || '_payload_gin_idx', t);
 
-    -- Migration idempotente des données déjà présentes dans la table générique.
+    -- Copie idempotente : les données originales restent dans cra_records.
     execute format(
-      'insert into public.%I (table_name,id,owner_email,payload,created_at) '
-      'select table_name,id,owner_email,payload,created_at from only public.cra_records where table_name = %L '
-      'on conflict (table_name,id) do nothing', t,t
+      'insert into public.%I (id,owner_email,payload,created_at) ' ||
+      'select id,coalesce(owner_email,%L),payload,created_at from public.cra_records ' ||
+      'where table_name=%L on conflict (id) do nothing',
+      t, '', t
     );
-    execute format('delete from only public.cra_records where table_name = %L', t);
 
-    execute format('drop trigger if exists %I on public.%I', t || '_audit', t);
-    execute format(
-      'create trigger %I after insert or update or delete on public.%I for each row execute function public.cra_audit_records_trigger()',
-      t || '_audit',t
-    );
-  end loop;
-end; $$;
-
-drop trigger if exists cra_records_route_insert on public.cra_records;
-create trigger cra_records_route_insert before insert on public.cra_records
-for each row execute function public.cra_route_record_insert();
-
--- Les rôles anon/authenticated ne peuvent pas accéder directement aux tables métier.
-do $$
-declare t text;
-begin
-  foreach t in array array[
-    'cra_collaboration','cra_culture_folders','cra_cultures','cra_forms',
-    'cra_measurement_drafts','cra_measurement_sheets',
-    'cra_phytosanitary_diagnostics','cra_responses','cra_technical_sheets',
-    'cra_trial_observations','cra_trials'
-  ] loop
     execute format('alter table public.%I enable row level security', t);
     execute format('revoke all on public.%I from anon, authenticated', t);
     execute format('grant all on public.%I to service_role', t);
+    execute format('drop trigger if exists %I on public.%I', t || '_audit', t);
+    execute format(
+      'create trigger %I after insert or update or delete on public.%I ' ||
+      'for each row execute function public.cra_audit_records_trigger()',
+      t || '_audit', t
+    );
   end loop;
 end; $$;
 
@@ -308,6 +303,12 @@ returns trigger language plpgsql as $$ begin raise exception 'cra_audit_log is a
 drop trigger if exists cra_audit_immutable on public.cra_audit_log;
 create trigger cra_audit_immutable before update or delete on public.cra_audit_log
 for each row execute function public.cra_deny_audit_mutation();
+
+
+-- Actualise le cache de schéma PostgREST après la création des tables.
+drop trigger if exists cra_records_route_insert on public.cra_records;
+drop function if exists public.cra_route_record_insert();
+notify pgrst, 'reload schema';
 """
 
 @st.cache_resource(show_spinner=False)
@@ -371,12 +372,12 @@ class SupabaseQuery:
             if len(page)<page_size: break
         return output[:maximum]
     def _record_query(self):
-        q=_SUPABASE.table("cra_records").select("table_name,id,owner_email,payload,created_at").eq("table_name",self.table)
+        # Chaque module lit désormais sa table PostgreSQL autonome.
+        q=_SUPABASE.table(self.table).select("id,owner_email,payload,created_at")
         for key,value in self.filters:
             if key in {"id","owner_email","created_at"}:
                 q=q.eq(key,value)
             else:
-                # Filtrage JSONB côté PostgreSQL : beaucoup moins de données transférées.
                 q=q.filter(f"payload->>{key}","eq",str(value))
         if self.sort:
             col,desc=self.sort
@@ -406,7 +407,8 @@ class SupabaseQuery:
             return DBResult(q.execute().data)
         if self.action == "insert":
             row=dict(self.payload); row.setdefault("id",str(uuid.uuid4())); row.setdefault("created_at",datetime.utcnow().isoformat())
-            _SUPABASE.table("cra_records").insert({"table_name":self.table,"id":row["id"],"owner_email":row.get("owner_email",""),"payload":row,"created_at":row["created_at"]}).execute()
+            stored={"id":str(row["id"]),"owner_email":row.get("owner_email",""),"payload":row,"created_at":row["created_at"]}
+            _SUPABASE.table(self.table).insert(stored).execute()
             self._audit("INSERT",row["id"],after=row); return DBResult([row])
 
         owner=st.session_state.get("cra_user_email")
@@ -436,8 +438,8 @@ class SupabaseQuery:
             selected=[r for r in selected if r.get("owner_email")==owner or r.get("id") in permitted or r.get("id") in shared_folders or r.get("folder_id") in shared_folders]
         if self.action in ("update","delete"):
             for row in selected:
-                key=_SUPABASE.table("cra_records").delete() if self.action=="delete" else _SUPABASE.table("cra_records").update({"payload":{**row,**self.payload}})
-                key.eq("table_name",self.table).eq("id",row["id"]).execute()
+                key=_SUPABASE.table(self.table).delete() if self.action=="delete" else _SUPABASE.table(self.table).update({"payload":{**row,**self.payload},"owner_email":({**row,**self.payload}).get("owner_email","")})
+                key.eq("id",str(row["id"])).execute()
                 self._audit(self.action.upper(),row["id"],before=row,after=({**row,**self.payload} if self.action=="update" else None))
             return DBResult(selected if self.action=="update" else [])
         if self.sort and self.sort[0] not in {"created_at","id","owner_email"}:
