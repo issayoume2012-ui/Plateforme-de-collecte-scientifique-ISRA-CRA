@@ -67,6 +67,8 @@ div[data-testid="stMetric"] {{background:white;border:1px solid #e1ebe4;border-r
 .stButton>button[kind="primary"] {{background:{GREEN};border-color:{GREEN};}}
 a {{color:{GREEN};}}
 footer {{visibility:hidden;}}
+[data-testid="stToolbar"] {{display:none !important;}}
+[data-testid="stHeader"] {{background:transparent;}}
 </style>
 """, unsafe_allow_html=True)
 
@@ -97,34 +99,33 @@ import os
 from urllib.parse import quote
 from supabase import create_client, Client
 
-# Paramètres du projet. La clé anon est publique ; elle ne remplace PAS
-# la clé service_role nécessaire à l'accès serveur lorsque RLS est activé.
-SUPABASE_URL = "https://mlmbvjzkesnwportvmax.supabase.co"
-SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1sbWJ2anprZXNud3BvcnR2bWF4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM0NTYyMjUsImV4cCI6MjEwOTAzMjIyNX0.Yjba6aH_KuaIrAeGVjHgPmnhx_cH_NllxFResbIqniE"
+# Lire les paramètres depuis Streamlit Cloud (st.secrets), avec repli
+# sur les variables d'environnement en local. Aucun secret n'est enregistré ici.
+def _config_value(name: str, default: str = "") -> str:
+    try:
+        value = st.secrets.get(name, default)
+        if value not in (None, ""):
+            return str(value)
+    except Exception:
+        pass
+    return str(os.getenv(name, default))
 
-# Connexion PostgreSQL utilisée uniquement pour créer automatiquement les tables.
-# Le mot de passe est codé ici à la demande ; remplacez-le après rotation.
-SUPABASE_DB_HOST = "aws-1-eu-west-3.pooler.supabase.com"
-SUPABASE_DB_PORT = "5432"
-SUPABASE_DB_NAME = "postgres"
-SUPABASE_DB_USER = "postgres.mlmbvjzkesnwportvmax"
-SUPABASE_DB_PASSWORD = os.getenv("SUPABASE_DB_PASSWORD", "Istetcom@2026")
-SUPABASE_DB_URL = os.getenv(
-    "SUPABASE_DB_URL",
-    f"postgresql://{quote(SUPABASE_DB_USER, safe='')}:{quote(SUPABASE_DB_PASSWORD, safe='')}@{SUPABASE_DB_HOST}:{SUPABASE_DB_PORT}/{SUPABASE_DB_NAME}?sslmode=require",
-)
-
-# IMPORTANT : fournissez la clé service_role dans l'environnement d'exécution.
-# Elle n'a pas été communiquée ; la clé anon ci-dessus ne peut pas la remplacer.
-# Clé service_role fournie pour ce projet. Elle est privilégiée : ne publiez pas ce fichier.
-SUPABASE_SERVICE_ROLE_KEY = os.getenv(
-    "SUPABASE_SERVICE_ROLE_KEY",
-    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1sbWJ2anprZXNud3BvcnR2bWF4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MzQ1NjIyNSwiZXhwIjoyMTA5MDMyMjI1fQ.w9mYLuE-w89X6TtWL06pgoEvABgsmutgxQWxTZ_fZ5A"
-)
-
-# Compte administrateur initial de l'application ISRA.
-CRA_ADMIN_EMAIL = os.getenv("CRA_ADMIN_EMAIL", "keita@2026")
-CRA_ADMIN_PASSWORD = os.getenv("CRA_ADMIN_PASSWORD", "keita2026")
+SUPABASE_URL = _config_value("SUPABASE_URL", "https://mlmbvjzkesnwportvmax.supabase.co")
+SUPABASE_ANON_KEY = _config_value("SUPABASE_ANON_KEY")
+SUPABASE_DB_HOST = _config_value("SUPABASE_DB_HOST", "aws-1-eu-west-3.pooler.supabase.com")
+SUPABASE_DB_PORT = _config_value("SUPABASE_DB_PORT", "5432")
+SUPABASE_DB_NAME = _config_value("SUPABASE_DB_NAME", "postgres")
+SUPABASE_DB_USER = _config_value("SUPABASE_DB_USER", "postgres.mlmbvjzkesnwportvmax")
+SUPABASE_DB_PASSWORD = _config_value("SUPABASE_DB_PASSWORD")
+SUPABASE_DB_URL = _config_value("SUPABASE_DB_URL")
+if not SUPABASE_DB_URL and SUPABASE_DB_PASSWORD:
+    SUPABASE_DB_URL = (
+        f"postgresql://{quote(SUPABASE_DB_USER, safe='')}:{quote(SUPABASE_DB_PASSWORD, safe='')}"
+        f"@{SUPABASE_DB_HOST}:{SUPABASE_DB_PORT}/{SUPABASE_DB_NAME}?sslmode=require"
+    )
+SUPABASE_SERVICE_ROLE_KEY = _config_value("SUPABASE_SERVICE_ROLE_KEY")
+CRA_ADMIN_EMAIL = _config_value("CRA_ADMIN_EMAIL", "keita@2026")
+CRA_ADMIN_PASSWORD = _config_value("CRA_ADMIN_PASSWORD")
 
 # Création automatique du schéma PostgreSQL au démarrage.
 # La clé service_role ne permet PAS de créer des tables : cette opération
@@ -214,7 +215,10 @@ def _bootstrap_supabase_schema():
     try:
         import psycopg
     except ImportError as exc:
-        raise RuntimeError("Dépendance absente : installez psycopg avec `pip install 'psycopg[binary]'`.") from exc
+        raise RuntimeError(
+            "Dépendance psycopg absente. Ajoutez `psycopg[binary]>=3.2` à requirements.txt "
+            "puis redéployez l'application Streamlit."
+        ) from exc
     with psycopg.connect(SUPABASE_DB_URL, connect_timeout=15) as conn:
         with conn.cursor() as cur:
             cur.execute(_SCHEMA_SQL)
