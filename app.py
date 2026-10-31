@@ -1906,8 +1906,7 @@ elif page == "Essais expérimentaux XXL":
                 "modalities": modalities, "plot_area_m2": plot_area, "spacing": spacing,
                 "buffer_m": buffer, "start_date": start_date.isoformat(), "protocol": protocol}
             if db_insert("cra_trials", trial_payload):
-                st.success("Protocole expérimental enregistré.")
-                st.json(trial_payload)
+                st.success("Protocole expérimental enregistré avec succès.")
     st.markdown("---")
     st.markdown("#### C. Registre des essais et suivi des observations")
     trials = db_rows("cra_trials", 2000)
@@ -1996,7 +1995,6 @@ elif page == "Diagnostic phytosanitaire XXL":
             st.success("Diagnostic enregistré dans le registre phytosanitaire.")
             if urgency == "Urgent":
                 st.error("ALERTE URGENTE : transmettez rapidement ce diagnostic au responsable scientifique pour validation.")
-            st.json(diag)
     st.markdown("---")
     st.markdown("#### Registre sanitaire et alertes")
     diagnostics = db_rows("cra_phytosanitary_diagnostics", 5000)
@@ -2089,7 +2087,7 @@ elif page == "Créer un questionnaire":
                 st.error("L'URL publique doit commencer par https:// (ou http:// en test local).")
                 st.stop()
             link = f"{base_clean}/?form={fid}"
-            st.code(link)
+            st.text_input("Lien public du questionnaire", value=link, disabled=True, key=f"generated_link_{fid}")
             st.link_button("Ouvrir le questionnaire", link)
             try:
                 import qrcode
@@ -2119,7 +2117,6 @@ elif page == "Créer un questionnaire":
             st.caption(f"Contact pour les liens et les réponses : {CONTACT_EMAIL}")
         else:
             st.warning("Saisissez l'URL publique de votre application pour générer le lien complet. L'adresse e-mail ne remplace pas l'URL du site.")
-        st.code(f"?form={fid}", language="text")
 
 # ---------------------------------------------------------------------
 # LISTE FORMULAIRES ET RÉPONSES
@@ -2145,10 +2142,16 @@ elif page == "Questionnaires et réponses":
             with st.expander(f"📝 {form.get('title', 'Questionnaire')} · {'Actif' if form.get('active') else 'Désactivé'}"):
                 st.write(form.get("description", ""))
                 st.write(f"**Nombre de questions :** {len(form.get('questions') or [])}")
-                st.json(form.get("questions") or [])
+                for question_index, question in enumerate(form.get("questions") or [], start=1):
+                    if isinstance(question, dict):
+                        question_label = question.get("label") or question.get("question") or question.get("title") or f"Question {question_index}"
+                        question_type = question.get("type", "")
+                        st.markdown(f"**{question_index}. {question_label}**" + (f" _({question_type})_" if question_type else ""))
+                    else:
+                        st.markdown(f"**{question_index}. {question}**")
                 if public_base and fid:
                     public_link = f"{public_base}/?form={fid}"
-                    st.code(public_link)
+                    st.text_input("Lien public du questionnaire", value=public_link, disabled=True, key=f"public_link_display_{fid}")
                     st.link_button("Ouvrir le questionnaire public", public_link, use_container_width=True)
                     try:
                         import qrcode
@@ -2322,22 +2325,38 @@ elif page == "Données et exports":
             chosen_label = st.selectbox("Enregistrement", list(row_by_label), key=f"crud_row_{selected_table}")
             chosen_row = row_by_label[chosen_label]
             editable = {k: v for k, v in chosen_row.items() if k not in {"id", "owner_email", "created_at"}}
+            edited_values = {}
             with st.form(f"crud_edit_form_{selected_table}_{chosen_row.get('id')}"):
-                edited_json = st.text_area("Contenu modifiable (JSON)", value=json.dumps(editable, ensure_ascii=False, indent=2, default=str), height=300)
+                st.caption("Modifiez les champs ci-dessous. Les identifiants techniques et les droits de propriété sont protégés.")
+                for field_name, old_value in editable.items():
+                    label = field_name.replace("_", " ").strip().capitalize()
+                    widget_key = f"crud_field_{selected_table}_{chosen_row.get('id')}_{field_name}"
+                    if isinstance(old_value, bool):
+                        edited_values[field_name] = st.checkbox(label, value=old_value, key=widget_key)
+                    elif isinstance(old_value, (int, float)) and not isinstance(old_value, bool):
+                        edited_values[field_name] = st.number_input(label, value=old_value, key=widget_key)
+                    elif isinstance(old_value, list):
+                        initial_text = "\n".join(str(item) for item in old_value)
+                        edited_text = st.text_area(label + " (un élément par ligne)", value=initial_text, key=widget_key, height=100)
+                        edited_values[field_name] = [line.strip() for line in edited_text.splitlines() if line.strip()]
+                    elif isinstance(old_value, dict):
+                        # Les sous-objets restent inchangés dans cette interface simplifiée.
+                        edited_values[field_name] = old_value
+                        st.caption(f"{label} : sous-données conservées sans modification.")
+                    else:
+                        text_value = "" if old_value is None else str(old_value)
+                        if len(text_value) > 120 or "\n" in text_value:
+                            edited_values[field_name] = st.text_area(label, value=text_value, key=widget_key, height=100)
+                        else:
+                            edited_values[field_name] = st.text_input(label, value=text_value, key=widget_key)
                 save_record = st.form_submit_button("💾 Enregistrer les modifications", type="primary", use_container_width=True)
             if save_record:
                 try:
-                    revised = json.loads(edited_json)
-                    if not isinstance(revised, dict):
-                        raise ValueError("Le contenu doit être un objet JSON.")
-                    revised.pop("id", None)
-                    revised.pop("created_at", None)
-                    revised.pop("owner_email", None)
-                    if db_update(selected_table, str(chosen_row["id"]), revised):
+                    if db_update(selected_table, str(chosen_row["id"]), edited_values):
                         st.success("Modifications enregistrées.")
                         st.rerun()
                 except Exception as exc:
-                    st.error(f"Modification impossible : JSON invalide ou erreur Supabase : {exc}")
+                    st.error(f"Modification impossible : {exc}")
             st.markdown("#### Suppression")
             confirm_delete = st.checkbox("Je confirme vouloir supprimer définitivement cet enregistrement.", key=f"crud_confirm_{selected_table}_{chosen_row.get('id')}")
             if st.button("🗑️ Supprimer cet enregistrement", key=f"crud_delete_{selected_table}_{chosen_row.get('id')}", disabled=not confirm_delete, type="secondary", use_container_width=True):
