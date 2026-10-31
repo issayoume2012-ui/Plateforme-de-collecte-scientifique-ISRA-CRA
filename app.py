@@ -213,6 +213,82 @@ end; $$;
 drop trigger if exists cra_records_audit on public.cra_records;
 create trigger cra_records_audit after insert or update or delete on public.cra_records
 for each row execute function public.cra_audit_records_trigger();
+
+-- Tables métier physiques : chaque table est une table PostgreSQL distincte.
+-- Elles héritent de cra_records pour conserver le format JSONB utilisé par
+-- l'adaptateur applicatif sans modifier les écrans ni les fonctions métier.
+-- Les anciennes lignes stockées dans cra_records sont déplacées automatiquement.
+create or replace function public.cra_route_record_insert()
+returns trigger language plpgsql security definer set search_path=public as $$
+begin
+  if new.table_name = any (array[
+    'cra_collaboration','cra_culture_folders','cra_cultures','cra_forms',
+    'cra_measurement_drafts','cra_measurement_sheets',
+    'cra_phytosanitary_diagnostics','cra_responses','cra_technical_sheets',
+    'cra_trial_observations','cra_trials'
+  ]) then
+    execute format(
+      'insert into public.%I (table_name,id,owner_email,payload,created_at) values ($1,$2,$3,$4,$5)',
+      new.table_name
+    ) using new.table_name,new.id,new.owner_email,new.payload,new.created_at;
+    return null;
+  end if;
+  return new;
+end; $$;
+
+do $$
+declare t text;
+begin
+  foreach t in array array[
+    'cra_collaboration','cra_culture_folders','cra_cultures','cra_forms',
+    'cra_measurement_drafts','cra_measurement_sheets',
+    'cra_phytosanitary_diagnostics','cra_responses','cra_technical_sheets',
+    'cra_trial_observations','cra_trials'
+  ] loop
+    execute format(
+      'create table if not exists public.%I (check (table_name = %L)) inherits (public.cra_records)',
+      t,t
+    );
+    execute format('create unique index if not exists %I on public.%I (table_name,id)', t || '_table_id_uidx', t);
+    execute format('create index if not exists %I on public.%I (owner_email)', t || '_owner_idx', t);
+    execute format('create index if not exists %I on public.%I using gin(payload)', t || '_payload_gin_idx', t);
+
+    -- Migration idempotente des données déjà présentes dans la table générique.
+    execute format(
+      'insert into public.%I (table_name,id,owner_email,payload,created_at) '
+      'select table_name,id,owner_email,payload,created_at from only public.cra_records where table_name = %L '
+      'on conflict (table_name,id) do nothing', t,t
+    );
+    execute format('delete from only public.cra_records where table_name = %L', t);
+
+    execute format('drop trigger if exists %I on public.%I', t || '_audit', t);
+    execute format(
+      'create trigger %I after insert or update or delete on public.%I for each row execute function public.cra_audit_records_trigger()',
+      t || '_audit',t
+    );
+  end loop;
+end; $$;
+
+drop trigger if exists cra_records_route_insert on public.cra_records;
+create trigger cra_records_route_insert before insert on public.cra_records
+for each row execute function public.cra_route_record_insert();
+
+-- Les rôles anon/authenticated ne peuvent pas accéder directement aux tables métier.
+do $$
+declare t text;
+begin
+  foreach t in array array[
+    'cra_collaboration','cra_culture_folders','cra_cultures','cra_forms',
+    'cra_measurement_drafts','cra_measurement_sheets',
+    'cra_phytosanitary_diagnostics','cra_responses','cra_technical_sheets',
+    'cra_trial_observations','cra_trials'
+  ] loop
+    execute format('alter table public.%I enable row level security', t);
+    execute format('revoke all on public.%I from anon, authenticated', t);
+    execute format('grant all on public.%I to service_role', t);
+  end loop;
+end; $$;
+
 create or replace function public.cra_audit_users_trigger()
 returns trigger language plpgsql security definer set search_path=public as $$
 declare old_row jsonb; new_row jsonb; rec_id text; op text;
