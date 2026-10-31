@@ -20,6 +20,7 @@ import uuid
 import hashlib
 import hmac
 import zipfile
+import time
 from datetime import date, datetime
 from io import BytesIO
 from typing import Any
@@ -48,10 +49,9 @@ CONTACT_EMAIL = "issayoume1801@gmail.com"
 
 st.markdown(f"""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700;800&display=swap');
-html, body, [class*="css"] {{font-family:'DM Sans',sans-serif;}}
+html, body, [class*="css"] {{font-family:system-ui,-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;}}
 .stApp {{background:#F1FAF7;color:{INK};}}
-.block-container {{padding-top:1.5rem;max-width:1500px;}}
+.block-container {{padding:1.2rem clamp(0.7rem,2.2vw,2rem) 2rem;max-width:1500px;width:100%;}}
 .hero {{background:linear-gradient(115deg,{DARK},{GREEN},#2C8B60);
 padding:27px 30px;border-radius:20px;color:white;border-bottom:5px solid {GOLD};
 margin-bottom:22px;box-shadow:0 12px 28px #103f2d20;}}
@@ -66,6 +66,35 @@ div[data-testid="stMetric"] {{background:white;border:1px solid #e1ebe4;border-r
 .stButton>button {{border-radius:10px;font-weight:700;}}
 .stButton>button[kind="primary"] {{background:{GREEN};border-color:{GREEN};}}
 a {{color:{GREEN};}}
+/* Mise en page adaptative : téléphone, tablette et ordinateur */
+[data-testid="stHorizontalBlock"] {{gap:clamp(.45rem,1.4vw,1.1rem);}}
+[data-testid="stVerticalBlock"] {{gap:.7rem;}}
+[data-testid="stTextInput"] input, [data-testid="stTextArea"] textarea,
+[data-testid="stSelectbox"] [data-baseweb="select"], [data-testid="stNumberInput"] input {{
+  min-height:44px;border-radius:10px;font-size:16px;
+}}
+.stButton>button, [data-testid="stDownloadButton"] button {{min-height:44px;width:100%;white-space:normal;}}
+[data-testid="stDataFrame"], [data-testid="stTable"] {{width:100%;overflow-x:auto;}}
+@media (max-width: 900px) {{
+  .block-container {{padding:1rem .85rem 1.5rem;}}
+  .hero {{padding:21px 19px;border-radius:16px;}}
+  .card {{padding:15px;border-radius:13px;}}
+  .section-title {{font-size:clamp(20px,4vw,25px);}}
+}}
+@media (max-width: 640px) {{
+  .block-container {{padding:.65rem .55rem 1.2rem;}}
+  .hero {{padding:17px 15px;margin-bottom:13px;}}
+  .hero h1 {{font-size:25px;line-height:1.2;}}
+  .hero p {{font-size:13px;line-height:1.5;}}
+  .isra-band {{font-size:10px;padding:9px 11px;gap:7px;}}
+  .card {{padding:12px;margin:6px 0 12px;}}
+  [data-testid="stMetric"] {{padding:9px;}}
+  [data-testid="stMetricValue"] {{font-size:1.35rem;}}
+  [data-testid="stHorizontalBlock"] {{flex-wrap:wrap;}}
+  [data-testid="stHorizontalBlock"] > [data-testid="column"] {{min-width:100% !important;flex:1 1 100% !important;}}
+  .stButton>button, [data-testid="stDownloadButton"] button {{min-height:46px;font-size:15px;}}
+  input, textarea {{font-size:16px !important;}}
+}}
 footer {{visibility:hidden;}}
 [data-testid="stToolbar"] {{display:none !important;}}
 [data-testid="stHeader"] {{background:transparent;}}
@@ -205,30 +234,34 @@ create trigger cra_audit_immutable before update or delete on public.cra_audit_l
 for each row execute function public.cra_deny_audit_mutation();
 """
 
-def _bootstrap_supabase_schema():
-    if not SUPABASE_DB_URL:
+@st.cache_resource(show_spinner=False)
+def _bootstrap_supabase_schema_once(db_url: str):
+    """Initialise le schéma une seule fois par processus Streamlit, pas à chaque clic."""
+    if not db_url:
         raise RuntimeError(
-            "SUPABASE_DB_URL manquant. Pour créer automatiquement les tables, "
-            "définissez l'URI PostgreSQL Supabase (Project Settings > Database > Connection string) "
-            "dans les secrets Streamlit. La clé anon/service_role ne peut pas créer des tables."
+            "SUPABASE_DB_URL manquant. Ajoutez l'URI PostgreSQL Supabase dans les secrets Streamlit."
         )
     try:
         import psycopg
     except ImportError as exc:
         raise RuntimeError(
-            "Dépendance psycopg absente. Ajoutez `psycopg[binary]>=3.2` à requirements.txt "
-            "puis redéployez l'application Streamlit."
+            "Dépendance psycopg absente. Ajoutez `psycopg[binary]>=3.2` à requirements.txt."
         ) from exc
-    with psycopg.connect(SUPABASE_DB_URL, connect_timeout=15) as conn:
+    with psycopg.connect(db_url, connect_timeout=8) as conn:
         with conn.cursor() as cur:
             cur.execute(_SCHEMA_SQL)
+    return True
+
+@st.cache_resource(show_spinner=False)
+def _get_supabase_client(url: str, service_key: str) -> Client:
+    return create_client(url, service_key)
 
 if not SUPABASE_SERVICE_ROLE_KEY:
     st.error("Configuration manquante : définissez SUPABASE_SERVICE_ROLE_KEY dans les secrets Streamlit.")
     st.stop()
 try:
-    _bootstrap_supabase_schema()
-    _SUPABASE: Client = create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    _bootstrap_supabase_schema_once(SUPABASE_DB_URL)
+    _SUPABASE: Client = _get_supabase_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 except Exception as exc:
     st.error(f"Initialisation Supabase impossible : {exc}")
     st.stop()
@@ -253,6 +286,27 @@ class SupabaseQuery:
             "table_name":self.table,"record_id":str(row_id or ""),"before_data":before,
             "after_data":after,"event_at":datetime.utcnow().isoformat()
         }).execute()
+    def _fetch_pages(self, query):
+        """Récupère les lignes par pages pour éviter la limite PostgREST de 1 000."""
+        output=[]; page_size=500; maximum=self.max_rows or 5000
+        while len(output)<maximum:
+            page=query.range(len(output), min(len(output)+page_size, maximum)-1).execute().data or []
+            output.extend(page)
+            if len(page)<page_size: break
+        return output[:maximum]
+    def _record_query(self):
+        q=_SUPABASE.table("cra_records").select("table_name,id,owner_email,payload,created_at").eq("table_name",self.table)
+        for key,value in self.filters:
+            if key in {"id","owner_email","created_at"}:
+                q=q.eq(key,value)
+            else:
+                # Filtrage JSONB côté PostgreSQL : beaucoup moins de données transférées.
+                q=q.filter(f"payload->>{key}","eq",str(value))
+        if self.sort:
+            col,desc=self.sort
+            if col in {"created_at","id","owner_email"}:
+                q=q.order(col,desc=desc)
+        return q
     def execute(self):
         if self.table == "cra_users":
             q=_SUPABASE.table("cra_users")
@@ -262,14 +316,12 @@ class SupabaseQuery:
                 for r in result.data or []: self._audit("INSERT",r.get("id"),after=r)
                 return DBResult(result.data)
             if self.action == "update":
-                users=_SUPABASE.table("cra_users").select("*").execute().data or []
-                for r in users:
-                    if all(r.get(k)==v for k,v in self.filters):
-                        patch={k:v for k,v in self.payload.items() if k in {"active","display_name","role","permissions","password_hash"}}
-                        if patch:
-                            _SUPABASE.table("cra_users").update(patch).eq("id",r["id"]).execute()
-                            self._audit("UPDATE",r["id"],before=r,after={**r,**patch})
-                return DBResult([])
+                patch={k:v for k,v in self.payload.items() if k in {"active","display_name","role","permissions","password_hash"}}
+                uq=_SUPABASE.table("cra_users").update(patch)
+                for k,v in self.filters: uq=uq.eq(k,v)
+                result=uq.execute()
+                for r in result.data or []: self._audit("UPDATE",r.get("id"),after=r)
+                return DBResult(result.data)
             if self.action == "delete": raise PermissionError("Suppression des comptes interdite : désactivez le compte.")
             q=q.select(self.columns)
             for k,v in self.filters: q=q.eq(k,v)
@@ -280,13 +332,31 @@ class SupabaseQuery:
             row=dict(self.payload); row.setdefault("id",str(uuid.uuid4())); row.setdefault("created_at",datetime.utcnow().isoformat())
             _SUPABASE.table("cra_records").insert({"table_name":self.table,"id":row["id"],"owner_email":row.get("owner_email",""),"payload":row,"created_at":row["created_at"]}).execute()
             self._audit("INSERT",row["id"],after=row); return DBResult([row])
-        stored=_SUPABASE.table("cra_records").select("*").eq("table_name",self.table).execute().data or []
-        rows=[dict(x.get("payload") or {}) for x in stored]
+
         owner=st.session_state.get("cra_user_email")
         shared_ids,shared_folders=collaboration_permissions() if owner and self.table!="cra_collaboration" else ({},set())
         permitted=shared_ids.get(self.table,set())
+        base=self._record_query()
+        if owner and self.table!="cra_collaboration":
+            # Charge d'abord les données du propriétaire depuis l'index SQL.
+            own_q=base.eq("owner_email",owner)
+            stored=self._fetch_pages(own_q)
+            # Les fiches partagées sont récupérées par identifiant, sans charger toute la table.
+            if permitted:
+                shared_q=self._record_query().in_("id",list(permitted))
+                stored.extend(self._fetch_pages(shared_q))
+            # Les éléments des dossiers partagés sont le seul cas nécessitant
+            # une recherche complémentaire dans le JSONB.
+            if shared_folders:
+                folder_q=self._record_query().in_("payload->>folder_id",list(shared_folders))
+                stored.extend(self._fetch_pages(folder_q))
+            dedup={x.get("id"):x for x in stored if x.get("id")}
+            stored=list(dedup.values())
+        else:
+            stored=self._fetch_pages(base)
+        rows=[dict(x.get("payload") or {}) for x in stored]
         selected=[r for r in rows if all(r.get(k)==v for k,v in self.filters)]
-        if owner:
+        if owner and self.table!="cra_collaboration":
             selected=[r for r in selected if r.get("owner_email")==owner or r.get("id") in permitted or r.get("id") in shared_folders or r.get("folder_id") in shared_folders]
         if self.action in ("update","delete"):
             for row in selected:
@@ -294,7 +364,7 @@ class SupabaseQuery:
                 key.eq("table_name",self.table).eq("id",row["id"]).execute()
                 self._audit(self.action.upper(),row["id"],before=row,after=({**row,**self.payload} if self.action=="update" else None))
             return DBResult(selected if self.action=="update" else [])
-        if self.sort:
+        if self.sort and self.sort[0] not in {"created_at","id","owner_email"}:
             col,desc=self.sort; selected.sort(key=lambda x:str(x.get(col) or ""),reverse=desc)
         if self.max_rows is not None: selected=selected[:self.max_rows]
         if self.columns!="*":
@@ -310,6 +380,9 @@ DB_MESSAGE="Base centrale Supabase PostgreSQL active · journal d’audit activ�
 def collaboration_permissions():
     email=st.session_state.get("cra_user_email",""); shared_records={}; shared_folders=set()
     if not email: return shared_records,shared_folders
+    cache=st.session_state.get("_cra_collab_cache")
+    if cache and cache.get("email")==email and time.monotonic()-cache.get("at",0)<20:
+        return cache["records"],set(cache["folders"])
     try:
         for item in DB.table("cra_collaboration").select("*").execute().data or []:
             recipients=item.get("shared_with",[])
@@ -320,6 +393,7 @@ def collaboration_permissions():
                 if item.get("target_type")=="folder": shared_folders.add(item.get("target_id"))
                 elif item.get("target_table") and item.get("target_id"):
                     shared_records.setdefault(item.get("target_table"),set()).add(item.get("target_id"))
+        st.session_state["_cra_collab_cache"]={"email":email,"at":time.monotonic(),"records":shared_records,"folders":list(shared_folders)}
     except Exception as exc: st.error(f"Lecture des droits de collaboration impossible : {exc}")
     return shared_records,shared_folders
 
@@ -672,7 +746,13 @@ if not st.session_state.cra_authenticated:
 # Relecture des droits à chaque actualisation : une révocation est prise en compte
 # sans attendre une nouvelle connexion de l'utilisateur.
 try:
-    fresh_user = DB.table("cra_users").select("*").eq("email", st.session_state.get("cra_user_email", "")).limit(1).execute().data or []
+    _cached_auth=st.session_state.get("_cra_auth_check")
+    if _cached_auth and _cached_auth.get("email")==st.session_state.get("cra_user_email") and time.monotonic()-_cached_auth.get("at",0)<30:
+        fresh_user=[_cached_auth["user"]]
+    else:
+        fresh_user = DB.table("cra_users").select("*").eq("email", st.session_state.get("cra_user_email", "")).limit(1).execute().data or []
+        if fresh_user:
+            st.session_state["_cra_auth_check"]={"email":st.session_state.get("cra_user_email"),"at":time.monotonic(),"user":fresh_user[0]}
     if not fresh_user or not fresh_user[0].get("active", True):
         for key in ["cra_authenticated", "cra_user_email", "cra_user_name", "cra_user_role", "cra_user_permissions"]:
             st.session_state.pop(key, None)
