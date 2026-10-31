@@ -378,7 +378,7 @@ class SupabaseQuery:
             if key in {"id","owner_email","created_at"}:
                 q=q.eq(key,value)
             else:
-                q=q.filter(f"payload->>{key}","eq",str(value))
+                q=q.filter(f"payload->>{key}","eq",(str(value).lower() if isinstance(value, bool) else str(value)))
         if self.sort:
             col,desc=self.sort
             if col in {"created_at","id","owner_email"}:
@@ -698,16 +698,22 @@ def render_public_form(form_id: str) -> None:
     heading("Réponse externe sécurisée", "Questionnaire à remplir",
             "Complétez les champs demandés puis envoyez votre réponse au CRA Saint-Louis.")
     try:
-        result = DB.table("cra_forms").select("*").eq("id", form_id).eq("active", True).limit(1).execute()
+        # Chercher d'abord par identifiant uniquement. Le champ active est dans
+        # payload JSONB : le filtrer côté PostgREST peut échouer selon le type
+        # booléen (true/True) et rendre un lien valide introuvable.
+        result = DB.table("cra_forms").select("*").eq("id", form_id).limit(1).execute()
         forms = result.data or []
     except Exception as exc:
         st.error(f"Impossible de charger ce questionnaire : {exc}")
         st.stop()
     if not forms:
-        st.error("Ce lien est invalide, désactivé ou le questionnaire n'existe plus.")
+        st.error("Questionnaire introuvable. Vérifiez que le lien correspond à l'URL publique actuelle de l'application.")
         st.stop()
 
     form = forms[0]
+    if form.get("active") is False or str(form.get("active", True)).strip().lower() in {"false", "0", "non"}:
+        st.warning("Ce questionnaire est actuellement désactivé par son créateur.")
+        st.stop()
     questions = form.get("questions") or []
     st.markdown(f"### {form.get('title', 'Questionnaire CRA')}")
     if form.get("description"):
@@ -2030,6 +2036,23 @@ elif page == "Créer un questionnaire":
             link = f"{base.strip().rstrip('/')}/?form={fid}"
             st.code(link)
             st.link_button("Ouvrir le questionnaire", link)
+            try:
+                import qrcode
+                qr_image = qrcode.make(link)
+                qr_buffer = BytesIO()
+                qr_image.save(qr_buffer, format="PNG")
+                qr_bytes = qr_buffer.getvalue()
+                st.markdown("#### QR code du questionnaire")
+                st.image(qr_bytes, caption="Scannez ce code avec un téléphone pour ouvrir le questionnaire.", width=230)
+                st.download_button(
+                    "📥 Télécharger le QR code (PNG)", qr_bytes,
+                    file_name=f"QR_QUESTIONNAIRE_{fid}.png",
+                    mime="image/png", use_container_width=True,
+                )
+            except ImportError:
+                st.warning("Pour afficher le QR code, ajoutez qrcode[pil]>=7.4 à requirements.txt puis redéployez.")
+            except Exception as qr_exc:
+                st.warning(f"Le lien est prêt, mais le QR code n'a pas pu être généré : {qr_exc}")
             from urllib.parse import quote
             mail_subject = quote(f"Questionnaire ISRA / CRA Saint-Louis : {title.strip()}")
             mail_body = quote(f"Bonjour,\n\nMerci de renseigner le questionnaire suivant :\n{link}\n\nContact ISRA / CRA Saint-Louis : {CONTACT_EMAIL}")
