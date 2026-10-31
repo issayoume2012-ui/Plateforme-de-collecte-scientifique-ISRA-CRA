@@ -2277,6 +2277,77 @@ elif page == "Données et exports":
             st.download_button("Télécharger aussi en PDF", pdf_bytes("Réponses aux questionnaires", pd.DataFrame(response_rows)),
                 "CRA_reponses.pdf", "application/pdf")
 
+
+    # Gestion CRUD transversale : rend disponibles modification et suppression
+    # pour les enregistrements des modules qui n'avaient pas encore ces boutons.
+    st.markdown("---")
+    st.markdown("### 🛠️ Modifier ou supprimer mes enregistrements")
+    st.caption("Sélectionnez un module puis un enregistrement. Les droits de propriété et de partage appliqués par la couche Supabase restent actifs. Les identifiants et propriétaires ne peuvent pas être modifiés ici.")
+    managed_tables = {
+        "Fiches techniques": "cra_technical_sheets",
+        "Fiches de mesure": "cra_measurement_sheets",
+        "Dossiers de culture": "cra_culture_folders",
+        "Cultures": "cra_cultures",
+        "Essais expérimentaux": "cra_trials",
+        "Observations d'essais": "cra_trial_observations",
+        "Diagnostics phytosanitaires": "cra_phytosanitary_diagnostics",
+        "Questionnaires": "cra_forms",
+        "Réponses aux questionnaires": "cra_responses",
+        "Brouillons de mesure": "cra_measurement_drafts",
+        "Partages / collaborations": "cra_collaboration",
+    }
+    with st.expander("Ouvrir la gestion des enregistrements", expanded=False):
+        selected_label = st.selectbox("Module à gérer", list(managed_tables), key="crud_table_label")
+        selected_table = managed_tables[selected_label]
+        try:
+            manageable_rows = db_rows(selected_table, 5000)
+            current_email = st.session_state.get("cra_user_email", "")
+            # Les éléments seulement partagés restent consultables mais ne sont
+            # pas proposés ici à la modification/suppression par un non-propriétaire.
+            manageable_rows = [r for r in manageable_rows
+                               if r.get("owner_email") == current_email
+                               or r.get("created_by") == current_email]
+        except Exception as exc:
+            manageable_rows = []
+            st.error(f"Lecture impossible pour {selected_label} : {exc}")
+        if not manageable_rows:
+            st.info("Aucun enregistrement accessible dans ce module.")
+        else:
+            def _crud_label(row):
+                title = (row.get("title") or row.get("name") or row.get("form_title") or
+                         row.get("folder_name") or row.get("trial_name") or row.get("reference") or
+                         row.get("respondent") or row.get("id"))
+                return f"{str(title)[:90]} — {str(row.get('id',''))[:8]}"
+            row_by_label = {_crud_label(r): r for r in manageable_rows}
+            chosen_label = st.selectbox("Enregistrement", list(row_by_label), key=f"crud_row_{selected_table}")
+            chosen_row = row_by_label[chosen_label]
+            editable = {k: v for k, v in chosen_row.items() if k not in {"id", "owner_email", "created_at"}}
+            with st.form(f"crud_edit_form_{selected_table}_{chosen_row.get('id')}"):
+                edited_json = st.text_area("Contenu modifiable (JSON)", value=json.dumps(editable, ensure_ascii=False, indent=2, default=str), height=300)
+                save_record = st.form_submit_button("💾 Enregistrer les modifications", type="primary", use_container_width=True)
+            if save_record:
+                try:
+                    revised = json.loads(edited_json)
+                    if not isinstance(revised, dict):
+                        raise ValueError("Le contenu doit être un objet JSON.")
+                    revised.pop("id", None)
+                    revised.pop("created_at", None)
+                    revised.pop("owner_email", None)
+                    if db_update(selected_table, str(chosen_row["id"]), revised):
+                        st.success("Modifications enregistrées.")
+                        st.rerun()
+                except Exception as exc:
+                    st.error(f"Modification impossible : JSON invalide ou erreur Supabase : {exc}")
+            st.markdown("#### Suppression")
+            confirm_delete = st.checkbox("Je confirme vouloir supprimer définitivement cet enregistrement.", key=f"crud_confirm_{selected_table}_{chosen_row.get('id')}")
+            if st.button("🗑️ Supprimer cet enregistrement", key=f"crud_delete_{selected_table}_{chosen_row.get('id')}", disabled=not confirm_delete, type="secondary", use_container_width=True):
+                try:
+                    DB.table(selected_table).delete().eq("id", str(chosen_row["id"])).execute()
+                    st.success("Enregistrement supprimé.")
+                    st.rerun()
+                except Exception as exc:
+                    st.error(f"Suppression impossible : {exc}")
+
 # ---------------------------------------------------------------------
 # GESTION DES COMPTES
 # ---------------------------------------------------------------------
