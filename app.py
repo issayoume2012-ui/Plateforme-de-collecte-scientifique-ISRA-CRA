@@ -694,83 +694,130 @@ def password_ok(password: str, stored: str) -> bool:
 # ---------------------------------------------------------------------
 # FORMULAIRE PUBLIC : ?form=IDENTIFIANT
 # ---------------------------------------------------------------------
+def _normalise_form_id(value: Any) -> str:
+    """Normalise l'identifiant transmis par le lien public."""
+    return str(value or "").strip().strip("{}[]()")
+
+
+def _question_options(question: dict) -> list[str]:
+    raw = question.get("options", [])
+    if isinstance(raw, str):
+        return [x.strip() for x in raw.split("|") if x.strip()]
+    if isinstance(raw, (list, tuple)):
+        return [str(x).strip() for x in raw if str(x).strip()]
+    return []
+
+
 def render_public_form(form_id: str) -> None:
+    """Affiche un questionnaire public et enregistre une réponse liée au bon formulaire."""
+    form_id = _normalise_form_id(form_id)
     heading("Réponse externe sécurisée", "Questionnaire à remplir",
             "Complétez les champs demandés puis envoyez votre réponse au CRA Saint-Louis.")
+    if not form_id:
+        st.error("Le lien ne contient pas d'identifiant de questionnaire.")
+        st.stop()
     try:
-        # Chercher d'abord par identifiant uniquement. Le champ active est dans
-        # payload JSONB : le filtrer côté PostgREST peut échouer selon le type
-        # booléen (true/True) et rendre un lien valide introuvable.
-        result = DB.table("cra_forms").select("*").eq("id", form_id).limit(1).execute()
-        forms = result.data or []
+        # Les tables métier autonomes stockent le document dans payload JSONB.
+        forms = DB.table("cra_forms").select("*").eq("id", form_id).limit(1).execute().data or []
     except Exception as exc:
-        st.error(f"Impossible de charger ce questionnaire : {exc}")
+        st.error(f"Impossible de charger ce questionnaire depuis Supabase : {exc}")
         st.stop()
     if not forms:
-        st.error("Questionnaire introuvable. Vérifiez que le lien correspond à l'URL publique actuelle de l'application.")
+        st.error("Questionnaire introuvable. Le lien peut être ancien ou l'identifiant absent de Supabase.")
+        st.caption("Demandez au créateur de rouvrir le questionnaire dans « Questionnaires et réponses » et de recopier son lien public.")
         st.stop()
 
     form = forms[0]
-    if form.get("active") is False or str(form.get("active", True)).strip().lower() in {"false", "0", "non"}:
+    active_value = form.get("active", True)
+    if active_value is False or str(active_value).strip().lower() in {"false", "0", "non", "désactivé", "desactive"}:
         st.warning("Ce questionnaire est actuellement désactivé par son créateur.")
         st.stop()
     questions = form.get("questions") or []
-    st.markdown(f"### {form.get('title', 'Questionnaire CRA')}")
+    if not isinstance(questions, list) or not questions:
+        st.error("Ce questionnaire existe, mais aucune question exploitable n'est enregistrée. Modifiez-le ou recréez-le.")
+        st.stop()
+
+    st.markdown(f"### {form.get('title') or 'Questionnaire ISRA / CRA'}")
     if form.get("description"):
         st.write(form["description"])
     st.caption("Les champs marqués * sont obligatoires.")
-    st.markdown(f"**Contact pour ce questionnaire :** [{CONTACT_EMAIL}](mailto:{CONTACT_EMAIL})")
-    answers = {}
-    with st.form(f"public_{form_id}"):
-        respondent = st.text_input("Nom / structure du répondant *")
-        contact = st.text_input("Téléphone ou adresse e-mail (facultatif)")
-        for i, q in enumerate(questions):
-            label = q.get("label", f"Question {i+1}")
-            qtype = q.get("type", "Texte court")
-            required = bool(q.get("required", False))
+    st.markdown(f"**Contact :** [{CONTACT_EMAIL}](mailto:{CONTACT_EMAIL})")
+
+    answers_by_id: dict[str, Any] = {}
+    answers_by_label: dict[str, Any] = {}
+    question_labels: dict[str, str] = {}
+    with st.form(f"public_form_{form_id}", clear_on_submit=False):
+        respondent = st.text_input("Nom / structure du répondant *", key=f"respondent_{form_id}")
+        contact = st.text_input("Téléphone ou adresse e-mail (facultatif)", key=f"contact_{form_id}")
+        for i, question in enumerate(questions):
+            if not isinstance(question, dict):
+                continue
+            label = str(question.get("label") or question.get("question") or f"Question {i+1}").strip()
+            qid = str(question.get("id") or f"q_{i+1}")
+            qtype = str(question.get("type") or "Texte court")
+            required = question.get("required", question.get("obligatoire", False))
+            required = required is True or str(required).strip().lower() in {"true", "1", "oui", "yes"}
             label_ui = label + (" *" if required else "")
-            key = f"public_{form_id}_{i}"
+            widget_key = f"answer_{form_id}_{qid}_{i}"
             if qtype == "Texte long":
-                value = st.text_area(label_ui, key=key)
+                value = st.text_area(label_ui, key=widget_key)
             elif qtype == "Nombre":
-                value = st.number_input(label_ui, value=0.0, key=key)
+                value = st.number_input(label_ui, value=0.0, key=widget_key)
             elif qtype == "Date":
-                value = st.date_input(label_ui, value=date.today(), key=key)
-                value = value.isoformat()
+                value = st.date_input(label_ui, value=date.today(), key=widget_key).isoformat()
             elif qtype == "Oui / Non":
-                value = st.radio(label_ui, ["Oui", "Non"], horizontal=True, key=key)
+                value = st.radio(label_ui, ["Oui", "Non"], horizontal=True, key=widget_key)
             elif qtype == "Choix unique":
-                options = [x.strip() for x in q.get("options", "").split("|") if x.strip()]
-                value = st.selectbox(label_ui, options or ["Aucune option définie"], key=key)
+                options = _question_options(question)
+                value = st.selectbox(label_ui, options or ["Aucune option définie"], key=widget_key)
             elif qtype == "Choix multiple":
-                options = [x.strip() for x in q.get("options", "").split("|") if x.strip()]
-                value = st.multiselect(label_ui, options, key=key)
+                options = _question_options(question)
+                value = st.multiselect(label_ui, options, key=widget_key)
             else:
-                value = st.text_input(label_ui, key=key)
-            answers[label] = value
+                value = st.text_input(label_ui, key=widget_key)
+            answers_by_id[qid] = value
+            answers_by_label[label] = value
+            question_labels[qid] = label
         send = st.form_submit_button("📨 Envoyer ma réponse", type="primary", use_container_width=True)
+
     if send:
-        missing = [q.get("label", "") for i, q in enumerate(questions)
-                   if q.get("required") and not str(answers.get(q.get("label", ""), "")).strip()]
+        missing = []
         if not respondent.strip():
-            st.error("Veuillez indiquer votre nom ou votre structure.")
-        elif missing:
-            st.error("Veuillez répondre aux questions obligatoires : " + ", ".join(missing))
+            missing.append("Nom / structure du répondant")
+        for i, question in enumerate(questions):
+            if not isinstance(question, dict):
+                continue
+            label = str(question.get("label") or question.get("question") or f"Question {i+1}").strip()
+            qid = str(question.get("id") or f"q_{i+1}")
+            required = question.get("required", question.get("obligatoire", False))
+            required = required is True or str(required).strip().lower() in {"true", "1", "oui", "yes"}
+            answer = answers_by_id.get(qid)
+            empty = answer is None or answer == "" or answer == []
+            if required and empty:
+                missing.append(label)
+        if missing:
+            st.error("Veuillez compléter les champs obligatoires : " + ", ".join(missing))
         else:
             payload = {
+                "id": uuid.uuid4().hex,
                 "form_id": form_id,
-                "form_title": form.get("title", ""),
+                "form_title": str(form.get("title") or "Questionnaire ISRA / CRA"),
                 "respondent": respondent.strip(),
                 "contact": contact.strip(),
-                "answers": answers,
-                "submitted_at": datetime.utcnow().isoformat(),
-                "owner_email": form.get("owner_email"),
+                # answers conserve le format historique pour les exports existants.
+                "answers": answers_by_label,
+                # answers_by_id évite les collisions si deux questions ont le même libellé.
+                "answers_by_id": answers_by_id,
+                "question_labels": question_labels,
+                "submitted_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
+                "owner_email": form.get("owner_email", ""),
             }
             if db_insert("cra_responses", payload):
-                st.success("Votre questionnaire a bien été transmis au CRA Saint-Louis. Merci pour votre participation.")
+                st.success("Votre réponse a bien été enregistrée. Merci pour votre participation.")
                 st.balloons()
+                st.info("Vous pouvez fermer cette page. Votre réponse est transmise au questionnaire correspondant.")
             else:
-                st.error("La réponse n'a pas pu être enregistrée. Réessayez ou contactez le CRA.")
+                st.error("La réponse n'a pas pu être enregistrée. Vérifiez votre connexion ou contactez le CRA.")
     st.markdown("---")
     st.caption(f"ISRA · CRA Saint-Louis — Collecte de données pour la recherche agricole. Contact : {CONTACT_EMAIL}")
     st.stop()
@@ -2001,11 +2048,15 @@ elif page == "Créer un questionnaire":
         for _, row in question_table.iterrows():
             label = str(row.get("Question", "")).strip()
             if label:
+                qtype = str(row.get("Type", "Texte court") or "Texte court")
+                options_raw = row.get("Options (séparées par |)", "")
+                options = str(options_raw or "").strip()
                 qlist.append({
+                    "id": uuid.uuid4().hex,
                     "label": label,
-                    "type": str(row.get("Type", "Texte court")),
+                    "type": qtype,
                     "required": bool(row.get("Obligatoire", False)),
-                    "options": str(row.get("Options (séparées par |)", "") or ""),
+                    "options": options,
                 })
         if not title.strip():
             st.error("Donnez un titre au questionnaire.")
@@ -2033,26 +2084,34 @@ elif page == "Créer un questionnaire":
         st.session_state["public_base"] = base.strip().rstrip("/")
         st.info(f"Adresse de contact officielle pour les questionnaires : {CONTACT_EMAIL}")
         if base.strip():
-            link = f"{base.strip().rstrip('/')}/?form={fid}"
+            base_clean = base.strip().rstrip("/")
+            if not base_clean.startswith(("https://", "http://")):
+                st.error("L'URL publique doit commencer par https:// (ou http:// en test local).")
+                st.stop()
+            link = f"{base_clean}/?form={fid}"
             st.code(link)
             st.link_button("Ouvrir le questionnaire", link)
             try:
                 import qrcode
-                qr_image = qrcode.make(link)
+                from qrcode.constants import ERROR_CORRECT_M
+                qr = qrcode.QRCode(version=None, error_correction=ERROR_CORRECT_M, box_size=10, border=4)
+                qr.add_data(link)
+                qr.make(fit=True)
+                qr_image = qr.make_image(fill_color="black", back_color="white")
                 qr_buffer = BytesIO()
                 qr_image.save(qr_buffer, format="PNG")
                 qr_bytes = qr_buffer.getvalue()
                 st.markdown("#### QR code du questionnaire")
-                st.image(qr_bytes, caption="Scannez ce code avec un téléphone pour ouvrir le questionnaire.", width=230)
+                st.image(qr_bytes, caption="Scannez ce code avec l'appareil photo du téléphone.", width=260)
                 st.download_button(
                     "📥 Télécharger le QR code (PNG)", qr_bytes,
                     file_name=f"QR_QUESTIONNAIRE_{fid}.png",
                     mime="image/png", use_container_width=True,
                 )
-            except ImportError:
-                st.warning("Pour afficher le QR code, ajoutez qrcode[pil]>=7.4 à requirements.txt puis redéployez.")
+                st.caption("Le QR code encode exactement le lien affiché ci-dessus. Testez-le avec un téléphone déconnecté du compte administrateur.")
             except Exception as qr_exc:
-                st.warning(f"Le lien est prêt, mais le QR code n'a pas pu être généré : {qr_exc}")
+                st.error(f"Génération du QR code impossible : {type(qr_exc).__name__}: {qr_exc}")
+                st.info("Vérifiez que requirements.txt est à la racine du dépôt et contient qrcode[pil]>=7.4 et Pillow>=10.0.")
             from urllib.parse import quote
             mail_subject = quote(f"Questionnaire ISRA / CRA Saint-Louis : {title.strip()}")
             mail_body = quote(f"Bonjour,\n\nMerci de renseigner le questionnaire suivant :\n{link}\n\nContact ISRA / CRA Saint-Louis : {CONTACT_EMAIL}")
@@ -2070,15 +2129,43 @@ elif page == "Questionnaires et réponses":
             "Consultez les formulaires créés, activez ou désactivez les liens et exportez les réponses.")
     forms = db_rows("cra_forms")
     responses = db_rows("cra_responses")
+    public_base = st.text_input(
+        "URL publique de cette application",
+        value=st.session_state.get("public_base", ""),
+        placeholder="https://votre-application.streamlit.app",
+        key="questionnaire_admin_public_base",
+        help="Cette URL sert à reconstruire les liens et QR codes des questionnaires déjà créés."
+    ).strip().rstrip("/")
+    st.session_state["public_base"] = public_base
     if not forms:
         st.info("Aucun questionnaire créé.")
     else:
         for form in forms:
+            fid = str(form.get("id") or "")
             with st.expander(f"📝 {form.get('title', 'Questionnaire')} · {'Actif' if form.get('active') else 'Désactivé'}"):
                 st.write(form.get("description", ""))
                 st.write(f"**Nombre de questions :** {len(form.get('questions') or [])}")
                 st.json(form.get("questions") or [])
-                fid = form.get("id")
+                if public_base and fid:
+                    public_link = f"{public_base}/?form={fid}"
+                    st.code(public_link)
+                    st.link_button("Ouvrir le questionnaire public", public_link, use_container_width=True)
+                    try:
+                        import qrcode
+                        qr_obj = qrcode.QRCode(box_size=8, border=4)
+                        qr_obj.add_data(public_link)
+                        qr_obj.make(fit=True)
+                        qr_img = qr_obj.make_image(fill_color="black", back_color="white")
+                        qr_io = BytesIO(); qr_img.save(qr_io, format="PNG")
+                        qr_data = qr_io.getvalue()
+                        st.image(qr_data, width=210, caption="QR code du lien public")
+                        st.download_button("Télécharger le QR code", qr_data,
+                            file_name=f"QR_QUESTIONNAIRE_{fid}.png", mime="image/png",
+                            key=f"qr_existing_{fid}", use_container_width=True)
+                    except Exception as qr_error:
+                        st.error(f"QR code indisponible : {type(qr_error).__name__}: {qr_error}")
+                elif fid:
+                    st.info("Renseignez l'URL publique ci-dessus pour afficher le lien et le QR code de ce questionnaire.")
                 col1, col2 = st.columns(2)
                 with col1:
                     if form.get("active"):
@@ -2094,16 +2181,24 @@ elif page == "Questionnaires et réponses":
                     st.metric("Réponses", n)
     st.markdown("---")
     st.markdown("### Réponses reçues")
-    selected_form = st.selectbox("Filtrer par questionnaire",
-        ["Tous"] + [f.get("title", "") for f in forms])
-    form_lookup = {f.get("title", ""): f.get("id") for f in forms}
-    filtered = responses if selected_form == "Tous" else [r for r in responses if r.get("form_id") == form_lookup.get(selected_form)]
+    form_options = {"Tous": None}
+    for item in forms:
+        item_id = str(item.get("id") or "")
+        display_name = f"{item.get('title', 'Questionnaire')} · {item_id[:8]}"
+        form_options[display_name] = item_id
+    selected_form = st.selectbox("Filtrer par questionnaire", list(form_options.keys()))
+    selected_form_id = form_options[selected_form]
+    filtered = responses if selected_form_id is None else [r for r in responses if str(r.get("form_id")) == str(selected_form_id)]
     if filtered:
         display = []
         for r in filtered:
             row = {"Questionnaire": r.get("form_title"), "Répondant": r.get("respondent"),
                    "Contact": r.get("contact"), "Date": r.get("submitted_at")}
-            row.update(r.get("answers") or {})
+            answer_values = r.get("answers") or {}
+            if not answer_values and r.get("answers_by_id"):
+                labels = r.get("question_labels") or {}
+                answer_values = {labels.get(k, k): v for k, v in r.get("answers_by_id", {}).items()}
+            row.update(answer_values)
             display.append(row)
         df = pd.DataFrame(display)
         st.dataframe(df, use_container_width=True, hide_index=True)
@@ -2167,7 +2262,11 @@ elif page == "Données et exports":
         for r in responses:
             row = {"Questionnaire": r.get("form_title"), "Répondant": r.get("respondent"),
                    "Contact": r.get("contact"), "Date": r.get("submitted_at")}
-            row.update(r.get("answers") or {})
+            answer_values = r.get("answers") or {}
+            if not answer_values and r.get("answers_by_id"):
+                labels = r.get("question_labels") or {}
+                answer_values = {labels.get(k, k): v for k, v in r.get("answers_by_id", {}).items()}
+            row.update(answer_values)
             response_rows.append(row)
         st.dataframe(pd.DataFrame(response_rows), use_container_width=True, hide_index=True)
         if response_rows:
