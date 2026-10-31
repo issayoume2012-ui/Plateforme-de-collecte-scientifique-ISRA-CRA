@@ -94,11 +94,37 @@ st.markdown("""
 # SUPABASE POSTGRESQL — stockage centralisé
 # ---------------------------------------------------------------------
 import os
+from urllib.parse import quote
 from supabase import create_client, Client
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "https://mlmbvjzkesnwportvmax.supabase.co")
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
-SUPABASE_DB_URL = os.getenv("SUPABASE_DB_URL", "")
+# Paramètres du projet. La clé anon est publique ; elle ne remplace PAS
+# la clé service_role nécessaire à l'accès serveur lorsque RLS est activé.
+SUPABASE_URL = "https://mlmbvjzkesnwportvmax.supabase.co"
+SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1sbWJ2anprZXNud3BvcnR2bWF4Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3OTM0NTYyMjUsImV4cCI6MjEwOTAzMjIyNX0.Yjba6aH_KuaIrAeGVjHgPmnhx_cH_NllxFResbIqniE"
+
+# Connexion PostgreSQL utilisée uniquement pour créer automatiquement les tables.
+# Le mot de passe est codé ici à la demande ; remplacez-le après rotation.
+SUPABASE_DB_HOST = "aws-1-eu-west-3.pooler.supabase.com"
+SUPABASE_DB_PORT = "5432"
+SUPABASE_DB_NAME = "postgres"
+SUPABASE_DB_USER = "postgres.mlmbvjzkesnwportvmax"
+SUPABASE_DB_PASSWORD = os.getenv("SUPABASE_DB_PASSWORD", "Istetcom@2026")
+SUPABASE_DB_URL = os.getenv(
+    "SUPABASE_DB_URL",
+    f"postgresql://{quote(SUPABASE_DB_USER, safe='')}:{quote(SUPABASE_DB_PASSWORD, safe='')}@{SUPABASE_DB_HOST}:{SUPABASE_DB_PORT}/{SUPABASE_DB_NAME}?sslmode=require",
+)
+
+# IMPORTANT : fournissez la clé service_role dans l'environnement d'exécution.
+# Elle n'a pas été communiquée ; la clé anon ci-dessus ne peut pas la remplacer.
+# Clé service_role fournie pour ce projet. Elle est privilégiée : ne publiez pas ce fichier.
+SUPABASE_SERVICE_ROLE_KEY = os.getenv(
+    "SUPABASE_SERVICE_ROLE_KEY",
+    "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Im1sbWJ2anprZXNud3BvcnR2bWF4Iiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc5MzQ1NjIyNSwiZXhwIjoyMTA5MDMyMjI1fQ.w9mYLuE-w89X6TtWL06pgoEvABgsmutgxQWxTZ_fZ5A"
+)
+
+# Compte administrateur initial de l'application ISRA.
+CRA_ADMIN_EMAIL = os.getenv("CRA_ADMIN_EMAIL", "keita@2026")
+CRA_ADMIN_PASSWORD = os.getenv("CRA_ADMIN_PASSWORD", "keita2026")
 
 # Création automatique du schéma PostgreSQL au démarrage.
 # La clé service_role ne permet PAS de créer des tables : cette opération
@@ -611,8 +637,8 @@ if not st.session_state.cra_authenticated:
         login_submit = st.form_submit_button("Se connecter", type="primary", use_container_width=True)
     if login_submit:
         try:
-            admin_email = os.getenv("CRA_ADMIN_EMAIL", "admin@cra.local").strip().lower()
-            admin_password = os.getenv("CRA_ADMIN_PASSWORD", "")
+            admin_email = CRA_ADMIN_EMAIL.strip().lower()
+            admin_password = CRA_ADMIN_PASSWORD
             if login_email.strip().lower() == admin_email and admin_password and hmac.compare_digest(login_password, admin_password):
                 found = DB.table("cra_users").select("*").eq("email", admin_email).limit(1).execute().data or []
                 if not found:
