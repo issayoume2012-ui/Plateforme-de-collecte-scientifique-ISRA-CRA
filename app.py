@@ -982,6 +982,14 @@ elif page == "Fiche technique":
     for folder in tech_folders:
         label = f"{folder.get('culture','Culture')} · {folder.get('folder_name','Dossier')} · {folder.get('folder_code','')}"
         tf_options[label] = folder.get("id", "")
+    # Streamlit interdit de modifier la valeur d'un widget dans session_state
+    # après que ce widget a été instancié. On applique donc la sélection en attente
+    # ici, avant la création du selectbox.
+    pending_tech_folder = st.session_state.pop("_pending_technical_folder_preselect", None)
+    if pending_tech_folder in tf_options:
+        st.session_state["technical_folder_preselect"] = pending_tech_folder
+    elif st.session_state.get("technical_folder_preselect") not in tf_options:
+        st.session_state["technical_folder_preselect"] = next(iter(tf_options))
     st.markdown("#### 📁 Classement préalable (facultatif mais recommandé)")
     preselected_tech_folder = st.selectbox("Définir le dossier avant de commencer la fiche", list(tf_options), key="technical_folder_preselect")
     preselected_tech_id = tf_options[preselected_tech_folder]
@@ -996,8 +1004,12 @@ elif page == "Fiche technique":
             if qname.strip() and qculture.strip():
                 qid=str(uuid.uuid4())
                 if db_insert("cra_culture_folders", {"id":qid,"folder_code":f"DC-{uuid.uuid4().hex[:8].upper()}","folder_name":qname.strip(),"culture":qculture.strip(),"campaign":qcampaign,"station":qstation,"responsible":st.session_state.get("cra_user_name",""),"description":"Dossier créé depuis la fiche technique","created_at":datetime.now().isoformat(timespec="seconds")}):
-                    st.session_state["technical_folder_preselect"]=next((k for k,v in {f"{x.get('culture','')} · {x.get('folder_name','')} · {x.get('folder_code','')}":x.get('id') for x in db_rows('cra_culture_folders',3000)}.items() if v==qid), "")
-                    st.success("Dossier créé. Relancez la sélection pour le choisir."); st.rerun()
+                    # Mémoriser la sélection pour le prochain rerun, sans modifier
+                    # l'état du selectbox déjà instancié pendant ce run.
+                    created_folder_label = next((f"{x.get('culture','')} · {x.get('folder_name','')} · {x.get('folder_code','')}" for x in db_rows('cra_culture_folders',3000) if str(x.get('id')) == qid), None)
+                    if created_folder_label:
+                        st.session_state["_pending_technical_folder_preselect"] = created_folder_label
+                    st.success("Dossier créé et sélectionné."); st.rerun()
             else: st.error("Le nom du dossier et la culture sont obligatoires.")
     with st.form("technical_sheet_xxl", clear_on_submit=True):
         st.markdown("#### 1. En-tête d'identification")
