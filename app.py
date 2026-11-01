@@ -2157,7 +2157,7 @@ elif page == "Fiche de mesure":
             if not columns_saved: columns_saved = ["Observation"]
             for n, gr in enumerate(grid_rows,1):
                 measure_grid_rows.append({"N° fiche":rec_no,"Code fiche":code,"N° ligne":n,
-                                          **{c:_plain(gr.get(c,"")) for c in columns_saved}})
+                                          **{c:_plain_export_value(gr.get(c,"")) for c in columns_saved}})
             if not grid_rows:
                 measure_grid_rows.append({"N° fiche":rec_no,"Code fiche":code,"N° ligne":"",
                                           **{c:"" for c in columns_saved}})
