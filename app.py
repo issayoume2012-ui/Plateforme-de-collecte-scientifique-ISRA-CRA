@@ -1220,6 +1220,10 @@ PAGES = [
     "Questionnaires et réponses", "Données et exports",
     "Dossiers de culture", "Collaboration", "Gestion des comptes",
 ]
+# Tous les onglets accessibles aux comptes ordinaires.
+# Seule la gestion des comptes reste réservée à l'administration.
+# Ne pas utiliser PAGES[:-2] ici : cela exclurait aussi « Collaboration ».
+USER_PAGES = [p for p in PAGES if p != "Gestion des comptes"]
 # Les droits sont configurés individuellement par l'administrateur.
 if st.session_state.get("cra_user_role") == "Administrateur des comptes":
     allowed_pages = PAGES[:]
@@ -3158,7 +3162,15 @@ elif page == "Gestion des comptes":
                 "Stagiaire": ["Tableau de bord", "Fiche technique", "Fiche de mesure", "Diagnostic phytosanitaire XXL", "Questionnaires et réponses", "Données et exports", "Dossiers de culture", "Collaboration"],
                 "Technicien": ["Tableau de bord", "Fiche technique", "Fiche de mesure", "Référentiel des cultures", "Diagnostic phytosanitaire XXL", "Questionnaires et réponses", "Données et exports", "Dossiers de culture", "Collaboration"],
             }
-            new_permissions = st.multiselect("Onglets autorisés pour cette personne", PAGES[:-2], default=role_defaults[new_role], help="Seuls les onglets sélectionnés apparaîtront dans sa barre de navigation. Les comptes et paramètres restent réservés à l'administration.")
+            # Streamlit exige que chaque valeur de « default » existe dans « options ».
+            # On filtre les droits par sécurité et on conserve Collaboration dans les choix.
+            default_permissions = [p for p in role_defaults.get(new_role, []) if p in USER_PAGES]
+            new_permissions = st.multiselect(
+                "Onglets autorisés pour cette personne",
+                options=USER_PAGES,
+                default=default_permissions,
+                help="Seuls les onglets sélectionnés apparaîtront dans sa barre de navigation. La gestion des comptes reste réservée à l'administration."
+            )
             create_user = st.form_submit_button("Créer l'espace personnel", type="primary")
         if create_user:
             if not new_name.strip() or not new_email.strip() or len(new_password) < 8:
@@ -3191,7 +3203,14 @@ elif page == "Gestion des comptes":
                         except Exception: current_permissions = []
                     with st.form("edit_user_permissions"):
                         st.markdown(f"**Droits de navigation de {target_user.get('display_name', target)}**")
-                        revised_permissions = st.multiselect("Onglets visibles dans son espace", PAGES[:-2], default=[x for x in current_permissions if x in PAGES[:-2]])
+                        # Les droits enregistrés sont également filtrés pour éviter
+                        # toute valeur absente des options proposées par Streamlit.
+                        current_permissions = current_permissions if isinstance(current_permissions, list) else []
+                        revised_permissions = st.multiselect(
+                            "Onglets visibles dans son espace",
+                            options=USER_PAGES,
+                            default=[x for x in current_permissions if x in USER_PAGES]
+                        )
                         save_permissions = st.form_submit_button("Enregistrer les autorisations", type="primary")
                     if save_permissions:
                         DB.table("cra_users").update({"permissions":revised_permissions}).eq("email", target).execute()
