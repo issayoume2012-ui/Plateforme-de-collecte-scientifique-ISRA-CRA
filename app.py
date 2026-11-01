@@ -613,62 +613,119 @@ def excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
 
 
 def pdf_bytes(title: str, frame: pd.DataFrame) -> bytes:
-    """Rapport PDF institutionnel avec identité ISRA/CRA et signature YAM Group."""
+    """Rapport PDF institutionnel robuste, y compris pour les tableaux très larges."""
     try:
         from reportlab.lib import colors
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.lib.enums import TA_CENTER, TA_LEFT
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, KeepTogether
+        from reportlab.lib.enums import TA_CENTER
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, LongTable, TableStyle, PageBreak
         from reportlab.lib.units import mm
         from xml.sax.saxutils import escape
+
         out = BytesIO()
-        doc = SimpleDocTemplate(out, pagesize=landscape(A4), rightMargin=12*mm, leftMargin=12*mm,
-                                topMargin=25*mm, bottomMargin=20*mm, title=str(title),
-                                author="ISRA — CRA Saint-Louis | YAM Group — YAM Numérique")
+        doc = SimpleDocTemplate(
+            out, pagesize=landscape(A4), rightMargin=12*mm, leftMargin=12*mm,
+            topMargin=25*mm, bottomMargin=20*mm, title=str(title),
+            author="ISRA — CRA Saint-Louis | YAM Group — YAM Numérique"
+        )
         styles = getSampleStyleSheet()
-        title_style = ParagraphStyle("YAMReportTitle", parent=styles["Title"], fontName="Helvetica-Bold",
-            fontSize=19, leading=23, alignment=TA_CENTER, textColor=colors.HexColor("#16483F"), spaceAfter=5)
-        subtitle = ParagraphStyle("YAMSubtitle", parent=styles["Normal"], fontSize=9, leading=12,
-            alignment=TA_CENTER, textColor=colors.HexColor("#6B9B8D"), spaceAfter=10)
-        cell = ParagraphStyle("YAMCell", parent=styles["BodyText"], fontSize=7.5, leading=9)
-        head = ParagraphStyle("YAMHead", parent=cell, fontName="Helvetica-Bold", textColor=colors.white)
-        story = [Paragraph("INSTITUT SÉNÉGALAIS DE RECHERCHES AGRICOLES", subtitle),
-                 Paragraph("ISRA · CENTRE DE RECHERCHES AGRICOLES DE SAINT-LOUIS", subtitle),
-                 Paragraph(escape(str(title)), title_style),
-                 Paragraph("DOCUMENT SCIENTIFIQUE · COLLECTE, EXPÉRIMENTATION ET TRAÇABILITÉ", subtitle),
-                 Spacer(1, 5*mm)]
+        title_style = ParagraphStyle(
+            "YAMReportTitleSafe", parent=styles["Title"], fontName="Helvetica-Bold",
+            fontSize=17, leading=21, alignment=TA_CENTER,
+            textColor=colors.HexColor("#16483F"), spaceAfter=6
+        )
+        subtitle = ParagraphStyle(
+            "YAMSubtitleSafe", parent=styles["Normal"], fontSize=8, leading=10,
+            alignment=TA_CENTER, textColor=colors.HexColor("#6B9B8D"), spaceAfter=6
+        )
+        cell = ParagraphStyle(
+            "YAMCellSafe", parent=styles["BodyText"], fontName="Helvetica",
+            fontSize=7.5, leading=9, wordWrap="CJK", splitLongWords=1,
+            spaceBefore=0, spaceAfter=0
+        )
+        head = ParagraphStyle(
+            "YAMHeadSafe", parent=cell, fontName="Helvetica-Bold",
+            textColor=colors.white
+        )
+        story = [
+            Paragraph("INSTITUT SÉNÉGALAIS DE RECHERCHES AGRICOLES", subtitle),
+            Paragraph("ISRA · CENTRE DE RECHERCHES AGRICOLES DE SAINT-LOUIS", subtitle),
+            Paragraph(escape(str(title)), title_style),
+            Paragraph("DOCUMENT SCIENTIFIQUE · COLLECTE, EXPÉRIMENTATION ET TRAÇABILITÉ", subtitle),
+            Spacer(1, 4*mm)
+        ]
+
         if frame is None or frame.empty:
-            data = [[Paragraph("Information", head)], [Paragraph("Aucune donnée enregistrée", cell)]]
+            rows = [[Paragraph("Rubrique", head), Paragraph("Information", head)],
+                    [Paragraph("État", cell), Paragraph("Aucune donnée enregistrée", cell)]]
         else:
-            data = [[Paragraph(escape(str(c)), head) for c in frame.columns]]
-            for row in frame.fillna("").astype(str).itertuples(index=False, name=None):
-                data.append([Paragraph(escape(str(v)[:1200]).replace("\n", "<br/>"), cell) for v in row])
-        available = doc.width
-        widths = [available/max(1, len(data[0]))] * max(1, len(data[0]))
-        table = Table(data, repeatRows=1, colWidths=widths, hAlign="LEFT")
+            # Format vertical en deux colonnes : évite les tableaux de 20 à 30 colonnes
+            # dont les cellules deviennent trop étroites et dépassent la hauteur d'une page.
+            rows = [[Paragraph("Rubrique", head), Paragraph("Information", head)]]
+            safe_frame = frame.fillna("").astype(str)
+            for record_no, values in enumerate(safe_frame.itertuples(index=False, name=None), start=1):
+                if len(safe_frame) > 1:
+                    rows.append([
+                        Paragraph("<b>Enregistrement " + str(record_no) + "</b>", cell),
+                        Paragraph("", cell)
+                    ])
+                for column_name, value in zip(safe_frame.columns, values):
+                    text_value = str(value).replace("\r\n", "\n").replace("\r", "\n")
+                    # Fractionne les contenus très longs en plusieurs lignes PDF paginables.
+                    text_value = text_value[:12000]
+                    pieces = []
+                    while len(text_value) > 700:
+                        cut = text_value.rfind(" ", 0, 700)
+                        if cut < 350:
+                            cut = 700
+                        pieces.append(text_value[:cut])
+                        text_value = text_value[cut:].lstrip()
+                    pieces.append(text_value)
+                    for piece_no, piece in enumerate(pieces):
+                        label = str(column_name) if piece_no == 0 else str(column_name) + " (suite)"
+                        rows.append([
+                            Paragraph(escape(label), cell),
+                            Paragraph(escape(piece).replace("\n", "<br/>") or "—", cell)
+                        ])
+
+        table = LongTable(
+            rows, colWidths=[48*mm, doc.width-48*mm], repeatRows=1,
+            hAlign="LEFT", splitByRow=1
+        )
         table.setStyle(TableStyle([
-            ("BACKGROUND", (0,0),(-1,0), colors.HexColor("#247A66")),
-            ("TEXTCOLOR", (0,0),(-1,0), colors.white),
-            ("GRID", (0,0),(-1,-1), .45, colors.HexColor("#8BB9AA")),
-            ("VALIGN", (0,0),(-1,-1), "TOP"), ("FONTSIZE", (0,0),(-1,-1), 7),
-            ("ROWBACKGROUNDS", (0,1),(-1,-1), [colors.white, colors.HexColor("#F1F6F2")]),
-            ("LEFTPADDING", (0,0),(-1,-1), 5), ("RIGHTPADDING", (0,0),(-1,-1), 5),
-            ("TOPPADDING", (0,0),(-1,-1), 5), ("BOTTOMPADDING", (0,0),(-1,-1), 5),
+            ("BACKGROUND", (0,0), (-1,0), colors.HexColor("#247A66")),
+            ("TEXTCOLOR", (0,0), (-1,0), colors.white),
+            ("BACKGROUND", (0,1), (0,-1), colors.HexColor("#EFF9F5")),
+            ("GRID", (0,0), (-1,-1), .4, colors.HexColor("#8BB9AA")),
+            ("VALIGN", (0,0), (-1,-1), "TOP"),
+            ("LEFTPADDING", (0,0), (-1,-1), 5),
+            ("RIGHTPADDING", (0,0), (-1,-1), 5),
+            ("TOPPADDING", (0,0), (-1,-1), 4),
+            ("BOTTOMPADDING", (0,0), (-1,-1), 4),
         ]))
         story.append(table)
+
         def decorate(canvas, document):
             canvas.saveState()
             w, h = landscape(A4)
-            canvas.setFillColor(colors.HexColor("#16483F")); canvas.rect(0, h-13*mm, w, 13*mm, fill=1, stroke=0)
-            canvas.setFillColor(colors.white); canvas.setFont("Helvetica-Bold", 9)
+            canvas.setFillColor(colors.HexColor("#16483F"))
+            canvas.rect(0, h-13*mm, w, 13*mm, fill=1, stroke=0)
+            canvas.setFillColor(colors.white)
+            canvas.setFont("Helvetica-Bold", 9)
             canvas.drawString(12*mm, h-8.5*mm, "ISRA  |  CRA SAINT-LOUIS")
-            canvas.setFont("Helvetica", 8); canvas.drawRightString(w-12*mm, h-8.5*mm, "RECHERCHE AGRICOLE & INNOVATION")
-            canvas.setStrokeColor(colors.HexColor("#DDB64C")); canvas.setLineWidth(2); canvas.line(12*mm, 15*mm, w-12*mm, 15*mm)
-            canvas.setFillColor(colors.HexColor("#16483F")); canvas.setFont("Helvetica-Bold", 8)
+            canvas.setFont("Helvetica", 8)
+            canvas.drawRightString(w-12*mm, h-8.5*mm, "RECHERCHE AGRICOLE & INNOVATION")
+            canvas.setStrokeColor(colors.HexColor("#DDB64C"))
+            canvas.setLineWidth(2)
+            canvas.line(12*mm, 15*mm, w-12*mm, 15*mm)
+            canvas.setFillColor(colors.HexColor("#16483F"))
+            canvas.setFont("Helvetica-Bold", 8)
             canvas.drawString(12*mm, 9*mm, "YAM GROUP · YAM NUMÉRIQUE")
-            canvas.setFont("Helvetica", 7); canvas.drawRightString(w-12*mm, 9*mm, f"Document scientifique · Page {document.page}")
+            canvas.setFont("Helvetica", 7)
+            canvas.drawRightString(w-12*mm, 9*mm, f"Document scientifique · Page {document.page}")
             canvas.restoreState()
+
         doc.build(story, onFirstPage=decorate, onLaterPages=decorate)
         return out.getvalue()
     except Exception as exc:
