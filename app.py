@@ -1138,7 +1138,27 @@ elif page == "Fiche technique":
         "observations": observations, "signature_numerique": signature, "lien_reference": lien_reference.strip(),
         "folder_id": dossier_id, "folder_name": dossier_nom,
     }
-    tech_frame = pd.DataFrame([{"N°": i+1, **row} for i,row in enumerate(tech_payload["observations_periodiques"])])
+    # Ne pas exporter les lignes vides du gabarit : seules les observations réellement
+    # renseignées apparaissent dans Excel, PDF et CSV. Les valeurs 0 et False restent valides.
+    def _is_filled_observation(row):
+        for value in row.values():
+            if value is None:
+                continue
+            if isinstance(value, str) and not value.strip():
+                continue
+            try:
+                if pd.isna(value):
+                    continue
+            except Exception:
+                pass
+            return True
+        return False
+
+    saved_observations = [row for row in tech_payload["observations_periodiques"] if _is_filled_observation(row)]
+    tech_frame = pd.DataFrame([{"N°": i+1, **row} for i,row in enumerate(saved_observations)],
+                              columns=["N°"] + list(obs_cols))
+    if tech_frame.empty:
+        tech_frame = pd.DataFrame(columns=["N°"] + list(obs_cols))
     tech_meta = {k:v for k,v in tech_payload.items() if k != "observations_periodiques"}
     tech_meta_frame = pd.DataFrame([{"Champ": k, "Valeur": json.dumps(v, ensure_ascii=False) if isinstance(v,(dict,list)) else v} for k,v in tech_meta.items()])
     def technical_excel_one_sheet(meta, frame):
@@ -2356,32 +2376,56 @@ elif page == "Données et exports":
     </style>""", unsafe_allow_html=True)
 
     def _as_rows(value):
-        """Normalise une grille quelle que soit sa représentation en base."""
-        if value is None or value == "":
+        """Normalise les grilles historiques et élimine uniquement les lignes entièrement vides."""
+        if value is None:
             return []
         if isinstance(value, str):
+            if not value.strip():
+                return []
             try:
                 value = json.loads(value)
             except Exception:
                 # Une chaîne libre (symptômes, protocole, commentaire) n'est pas une grille.
                 return []
+        if isinstance(value, pd.DataFrame):
+            value = value.to_dict(orient="records")
         if isinstance(value, dict):
             # Formats historiques : {rows:[...]}, {data:[...]}, ou dictionnaire-ligne.
             for key in ("rows", "data", "records", "items", "values"):
                 if isinstance(value.get(key), (list, dict)):
                     return _as_rows(value[key])
-            return [value]
-        if isinstance(value, list):
-            result = []
+            candidates = [value]
+        elif isinstance(value, (list, tuple)):
+            candidates = []
             for item in value:
                 if isinstance(item, dict):
-                    result.append(item)
+                    candidates.append(item)
                 elif isinstance(item, (list, tuple)):
-                    result.append({f"Colonne {i+1}": v for i, v in enumerate(item)})
+                    candidates.append({f"Colonne {i+1}": v for i, v in enumerate(item)})
                 else:
-                    result.append({"Valeur": item})
-            return result
-        return [{"Valeur": value}]
+                    candidates.append({"Valeur": item})
+        else:
+            candidates = [{"Valeur": value}]
+
+        result = []
+        for row in candidates:
+            cleaned = {}
+            has_content = False
+            for key, cell in row.items():
+                if cell is None or (isinstance(cell, str) and not cell.strip()):
+                    cleaned[str(key)] = ""
+                    continue
+                try:
+                    if pd.isna(cell):
+                        cleaned[str(key)] = ""
+                        continue
+                except Exception:
+                    pass
+                cleaned[str(key)] = cell
+                has_content = True  # conserve notamment 0 et False
+            if has_content:
+                result.append(cleaned)
+        return result
 
     def _plain(value):
         if isinstance(value, (dict, list, tuple)):
