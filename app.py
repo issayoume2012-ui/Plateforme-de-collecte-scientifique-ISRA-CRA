@@ -2442,6 +2442,18 @@ elif page == "Données et exports":
                 result.append(cleaned)
         return result
 
+    def _is_structured_grid(value):
+        """Vrai uniquement pour une grille structurée, jamais pour un texte libre."""
+        if isinstance(value, (list, tuple, pd.DataFrame, dict)):
+            return True
+        if isinstance(value, str) and value.strip().startswith(("[", "{")):
+            try:
+                parsed = json.loads(value)
+                return isinstance(parsed, (list, dict))
+            except Exception:
+                return False
+        return False
+
     def _plain(value):
         if isinstance(value, (dict, list, tuple)):
             return json.dumps(value, ensure_ascii=False, default=str)
@@ -2490,18 +2502,24 @@ elif page == "Données et exports":
             # Bloc 1 : données générales de la fiche, sous forme champ / valeur.
             rows.append({"Champ": "INFORMATIONS DE LA FICHE", "Valeur": ""})
             for key, value in record.items():
-                if key == "owner_email" or key in nested_grid_fields:
+                if key == "owner_email" or (key in nested_grid_fields and _is_structured_grid(record.get(key))):
                     continue
                 rows.append({"Champ": str(key).replace("_", " ").capitalize(), "Valeur": _plain(value)})
 
             # Bloc 2 : chacune des grilles de la fiche, en conservant ses colonnes.
             for field, grid_title in nested_grid_fields.items():
+                if not _is_structured_grid(record.get(field)):
+                    continue  # conserve les champs texte libres dans les informations générales
                 grid = _as_rows(record.get(field))
                 rows.append({"Champ": str(grid_title).upper(), "Valeur": f"{len(grid)} ligne(s) renseignée(s)"})
                 if not grid:
                     rows.append({"Champ": "État de la grille", "Valeur": "Aucune ligne renseignée dans cette fiche."})
                     continue
                 columns = list(dict.fromkeys(str(col) for item in grid for col in item.keys()))
+                # Garde les colonnes même si toutes leurs cellules sont vides : elles font
+                # partie du modèle scientifique défini par l'utilisateur.
+                if not columns:
+                    columns = ["Observation"]
                 # En-tête et lignes de la grille dans la même feuille que les données.
                 rows.append({"Champ": "N° ligne", **{col: col for col in columns}})
                 for line_no, item in enumerate(grid, 1):
@@ -2547,7 +2565,7 @@ elif page == "Données et exports":
             ref = rec.get("code") or rec.get("fiche_code") or rec.get("folder_code") or rec.get("title") or rec.get("id") or rec_no
             story.append(Paragraph(f"<b>{escape(str(ref))}</b> — {escape(str(rec.get('culture') or ''))}", styles["Heading2"]))
             fields = [[Paragraph("Champ", head), Paragraph("Valeur", head)]]
-            parsed_grids = {field: _as_rows(rec.get(field)) for field in nested_grid_fields}
+            parsed_grids = {field: (_as_rows(rec.get(field)) if _is_structured_grid(rec.get(field)) else []) for field in nested_grid_fields}
             for key, value in rec.items():
                 if key == "owner_email" or (key in nested_grid_fields and parsed_grids.get(key)):
                     continue
@@ -2565,11 +2583,13 @@ elif page == "Données et exports":
                 story.append(t)
             for field, grid_title in nested_grid_fields.items():
                 grid = parsed_grids.get(field) or []
+                story.extend([Spacer(1, 3*mm), Paragraph(f"<b>{escape(str(grid_title))}</b> — {len(grid)} ligne(s) renseignée(s)", styles["Heading3"])])
                 if not grid:
+                    story.append(Paragraph("Grille non renseignée dans cette fiche.", small))
                     continue
-                story.extend([Spacer(1, 3*mm), Paragraph(f"<b>{escape(str(grid_title))}</b> — {len(grid)} ligne(s)", styles["Heading3"])])
                 columns = list(dict.fromkeys(k for row in grid for k in row.keys()))
                 if not columns:
+                    story.append(Paragraph("Aucune colonne définie.", small))
                     continue
                 matrix = [[Paragraph(escape(str(c)), head) for c in columns]]
                 for row in grid:
@@ -2670,6 +2690,37 @@ elif page == "Données et exports":
                     widget_key = f"{key}_edit_{edit_record.get('id')}_{field}"
                     if isinstance(old, bool): edits[field] = st.checkbox(label_field, value=old, key=widget_key)
                     elif isinstance(old, (int,float)) and not isinstance(old,bool): edits[field] = st.number_input(label_field, value=old, key=widget_key)
+                    elif field in nested_grid_fields and _is_structured_grid(old):
+                        # Grille éditable visuellement : colonnes renommables, ajoutables,
+                        # supprimables, lignes ajoutables/supprimables. Pas besoin de JSON.
+                        grid_rows = _as_rows(old)
+                        if isinstance(old, str) and old.strip():
+                            try:
+                                parsed_old = json.loads(old)
+                                grid_rows = _as_rows(parsed_old)
+                            except Exception:
+                                grid_rows = []
+                        grid_cols = list(dict.fromkeys(
+                            str(col) for row in grid_rows for col in row.keys()
+                        ))
+                        if not grid_cols and grid_rows:
+                            grid_cols = list(grid_rows[0].keys())
+                        col_text = st.text_input(
+                            f"Colonnes de la grille — {label_field} (séparées par des virgules)",
+                            value=", ".join(grid_cols), key=widget_key + "_columns"
+                        )
+                        new_cols = list(dict.fromkeys(x.strip() for x in col_text.split(",") if x.strip()))
+                        if not new_cols:
+                            st.warning("Définissez au moins une colonne pour conserver cette grille.")
+                            new_cols = grid_cols or ["Observation"]
+                        base_rows = [{col: row.get(col, "") for col in new_cols} for row in grid_rows]
+                        grid_df = pd.DataFrame(base_rows, columns=new_cols)
+                        st.caption("Modifiez les cellules, ajoutez/supprimez des lignes avec le contrôle du tableau. Pour ajouter, renommer ou supprimer des colonnes, modifiez la liste ci-dessus.")
+                        edited_df = st.data_editor(
+                            grid_df, key=widget_key + "_grid_editor", num_rows="dynamic",
+                            use_container_width=True, hide_index=True
+                        )
+                        edits[field] = edited_df.fillna("").to_dict(orient="records")
                     elif isinstance(old, (dict,list)):
                         raw = json.dumps(old, ensure_ascii=False, indent=2, default=str)
                         edited = st.text_area(label_field + " (JSON)", value=raw, key=widget_key, height=140)
