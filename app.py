@@ -528,8 +528,21 @@ def as_csv(data: list[dict]) -> bytes:
 
 
 def download_button(label, data, file_name=None, mime=None, **kwargs):
-    """Téléchargement robuste : Streamlit reçoit toujours des octets prêts à servir."""
+    """Prépare un téléchargement non vide et évite les faux avertissements.
+
+    Un bouton désactivé (ex. aucune sélection) ne doit jamais être traité comme
+    un fichier vide. Les générateurs Excel/PDF renvoient des bytes ; les flux
+    BytesIO sont lus avec getvalue(), sans dépendre de leur curseur.
+    """
     try:
+        disabled = bool(kwargs.get("disabled", False))
+        if data is None:
+            if disabled:
+                st.download_button(label=label, data=b"", file_name=file_name,
+                                   mime=mime or "application/octet-stream", **kwargs)
+                return
+            st.error(f"Le contenu de « {file_name or label} » n'a pas été généré. Relancez l'export.")
+            return
         if isinstance(data, BytesIO):
             payload = data.getvalue()
         elif isinstance(data, memoryview):
@@ -546,12 +559,16 @@ def download_button(label, data, file_name=None, mime=None, **kwargs):
         else:
             payload = bytes(data)
         if not payload:
-            st.warning("Le fichier est vide : vérifiez les données avant le téléchargement.")
+            if disabled:
+                st.download_button(label=label, data=b"", file_name=file_name,
+                                   mime=mime or "application/octet-stream", **kwargs)
+            else:
+                st.error(f"L'export « {file_name or label} » a produit 0 octet. La génération doit être relancée.")
             return
         st.download_button(label=label, data=payload, file_name=file_name,
                            mime=mime or "application/octet-stream", **kwargs)
     except Exception as exc:
-        st.error(f"Téléchargement impossible pour « {file_name or label} » : {exc}")
+        st.error(f"Téléchargement impossible pour « {file_name or label} » : {type(exc).__name__}: {exc}")
 
 
 def two_sheet_fiche_excel(title, metadata, grid_frame, grid_title="Grille"):
@@ -652,7 +669,10 @@ def two_sheet_fiche_excel(title, metadata, grid_frame, grid_title="Grille"):
         sheet.print_title_rows = "1:6"
     output = BytesIO()
     wb.save(output)
-    return output.getvalue()
+    result = output.getvalue()
+    if not result or not result.startswith(b"PK"):
+        raise RuntimeError("Le classeur Excel n'a pas été généré correctement.")
+    return result
 
 
 def excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
@@ -752,7 +772,10 @@ def excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
             ws.print_area = f"A1:{last_col}{max(5, ws.max_row)}"
             ws.oddHeader.center.text = "&BISRA / CRA SAINT-LOUIS"
             ws.oddFooter.center.text = f"ISRA · CRA SAINT-LOUIS | YAM GROUP — YAM NUMÉRIQUE | {CONTACT_EMAIL}"
-    return output.getvalue()
+    result = output.getvalue()
+    if not result or not result.startswith(b"PK"):
+        raise RuntimeError("Le classeur Excel n'a pas été généré correctement.")
+    return result
 
 
 def pdf_bytes(title: str, frame: pd.DataFrame) -> bytes:
@@ -2900,8 +2923,13 @@ elif page == "Données et exports":
             title = r.get("code") or r.get("fiche_code") or r.get("folder_code") or r.get("folder_name") or r.get("trial_name") or r.get("title") or r.get("form_title") or r.get("respondent") or r.get("name") or str(r.get("id",""))
             return f"{title} · {str(r.get('culture',''))} · {str(r.get('id',''))[:8]}"
         by_label = {_label(r):r for r in visible}
-        selected_labels = st.multiselect("Téléchargement partiel — sélectionnez un ou plusieurs éléments", list(by_label), key=f"{key}_partial")
-        selected_records = [by_label[x] for x in selected_labels]
+        selected_labels = st.multiselect(
+            "Téléchargement — sélectionnez des éléments ou laissez vide pour tout exporter",
+            list(by_label), key=f"{key}_partial"
+        )
+        # Par défaut, l'absence de sélection signifie « toutes les fiches visibles ».
+        # Cela évite de générer deux exports vides alors que des fiches sont enregistrées.
+        selected_records = [by_label[x] for x in selected_labels] if selected_labels else list(visible)
 
         # Pour un dossier, les exports contiennent le dossier, ses fiches et toutes les grilles liées.
         if folder_mode and selected_records:
@@ -2936,7 +2964,7 @@ elif page == "Données et exports":
             pdf_payload = _records_pdf_bytes(label + " — sélection", selected_records, nested_grid_fields)
         else:
             xlsx_payload = pdf_payload = None
-            st.caption("Sélectionnez un ou plusieurs éléments pour activer les téléchargements partiels.")
+            st.caption("Aucune fiche enregistrée dans cette rubrique : les exports seront disponibles dès le premier enregistrement.")
 
         st.markdown("#### Modifier / classer une fiche")
         editable_records = [r for r in visible if r.get("owner_email") == st.session_state.get("cra_user_email") or r.get("created_by") == st.session_state.get("cra_user_email")]
