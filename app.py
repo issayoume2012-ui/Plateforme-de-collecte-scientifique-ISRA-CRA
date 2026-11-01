@@ -2334,7 +2334,7 @@ elif page == "Questionnaires et réponses":
 # ---------------------------------------------------------------------
 elif page == "Données et exports":
     heading("Archivage scientifique", "Données et exports",
-            "Consultez et téléchargez les fiches techniques, les mesures et les réponses aux enquêtes.")
+            "Sélectionnez les fiches à exporter, retrouvez leurs grilles, modifiez-les et classez-les dans les dossiers.")
     tech = db_rows("cra_technical_sheets")
     measures = db_rows("cra_measurement_sheets")
     responses = db_rows("cra_responses")
@@ -2342,258 +2342,221 @@ elif page == "Données et exports":
     trials = db_rows("cra_trials")
     trial_obs = db_rows("cra_trial_observations")
     diagnostics = db_rows("cra_phytosanitary_diagnostics")
-    st.markdown("### 📦 Export intégral de votre espace personnel")
-    all_measure_grid_rows = []
-    for measure_record in measures:
-        saved_grid = measure_record.get("grid") or []
-        if isinstance(saved_grid, str):
-            try: saved_grid = json.loads(saved_grid)
-            except Exception: saved_grid = []
-        for grid_index, grid_row in enumerate(saved_grid if isinstance(saved_grid, list) else [], start=1):
-            if isinstance(grid_row, dict):
-                all_measure_grid_rows.append({"Code fiche": measure_record.get("fiche_code"),
-                    "Culture": measure_record.get("culture"), "Essai": measure_record.get("essai"),
-                    "N° ligne": grid_index, **grid_row})
-    all_sheets = {
-        "Fiches techniques": pd.DataFrame(tech), "Fiches de mesure": pd.DataFrame([{k:v for k,v in r.items() if k != "grid"} for r in measures]),
-        "Grilles de mesures": pd.DataFrame(all_measure_grid_rows),
-        "Questionnaires": pd.DataFrame(db_rows("cra_forms")), "Réponses": pd.DataFrame(responses),
-        "Cultures": pd.DataFrame(cultures), "Essais": pd.DataFrame(trials),
-        "Observations essais": pd.DataFrame(trial_obs), "Diagnostics": pd.DataFrame(diagnostics),
+    forms = db_rows("cra_forms")
+    folders_export = db_rows("cra_culture_folders")
+
+    # Petite animation d'apparition et transitions discrètes : aucun effet lourd côté navigateur.
+    st.markdown("""<style>
+    @media (prefers-reduced-motion: no-preference) {
+      [data-testid='stVerticalBlock'] > div { animation: israIn .22s ease-out both; }
+      [data-testid='stDownloadButton'] button, .stButton button { transition: transform .12s ease, box-shadow .12s ease; }
+      [data-testid='stDownloadButton'] button:hover, .stButton button:hover { transform: translateY(-1px); }
+      @keyframes israIn { from {opacity:.82; transform:translateY(3px)} to {opacity:1; transform:translateY(0)} }
     }
-    st.download_button("📊 TÉLÉCHARGER TOUTES MES DONNÉES EN EXCEL (.xlsx)",
-        excel_bytes(all_sheets), "ISRA_CRA_MON_ESPACE_COMPLET.xlsx",
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", type="primary", use_container_width=True)
-    st.download_button("📄 Télécharger le rapport global en PDF", pdf_bytes("Synthèse de mon espace personnel", pd.DataFrame([
-        {"Module": name, "Nombre d'enregistrements": len(frame)} for name, frame in all_sheets.items()
-    ])), "ISRA_CRA_synthese_personnelle.pdf", "application/pdf", use_container_width=True)
-    # Exports détaillés par onglet : choisir d'abord le document/dossier, puis le format.
-    export_tabs = st.tabs(["Fiches techniques", "Fiches de mesure + grilles", "Dossiers de culture", "Essais et observations", "Diagnostics", "Réponses aux questionnaires"])
+    </style>""", unsafe_allow_html=True)
 
-    def _clean_export_row(row):
-        return {k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v)
-                for k, v in row.items() if k not in {"owner_email"}}
+    def _as_rows(value):
+        if isinstance(value, str):
+            try: value = json.loads(value)
+            except Exception: return []
+        if isinstance(value, dict):
+            value = value.get("rows", value.get("data", [value]))
+        return value if isinstance(value, list) else []
 
-    def _download_selected_record(label, records, key, prefix, include_grid=False, grid_key="grid", folder_children=False):
-        if not records:
-            st.info(f"Aucun élément disponible dans {label.lower()}.")
-            return
-        def _record_label(r):
-            main = (r.get("code") or r.get("fiche_code") or r.get("folder_name") or
-                    r.get("title") or r.get("essai") or r.get("form_title") or r.get("id"))
-            return f"{main} · {r.get('culture','')} · {str(r.get('id',''))[:8]}"
-        choices = {_record_label(r): r for r in records}
-        selected = st.selectbox(f"Sélectionner {label.lower()} à télécharger", list(choices), key=key)
-        record = choices[selected]
-        meta = _clean_export_row(record)
-        # Un export de dossier contient aussi les fiches et les grilles qui y sont classées.
-        if label == "dossiers de culture":
-            folder_id = record.get("id")
-            attached_tech = [r for r in tech if r.get("folder_id") == folder_id]
-            attached_measures = [r for r in measures if r.get("folder_id") == folder_id]
-            attached_grid_rows = []
-            for mr in attached_measures:
-                mg = mr.get("grid") or []
-                if isinstance(mg, str):
-                    try: mg = json.loads(mg)
-                    except Exception: mg = []
-                for gi, gr in enumerate(mg if isinstance(mg, list) else [], start=1):
-                    if isinstance(gr, dict):
-                        attached_grid_rows.append({"Code fiche": mr.get("fiche_code"), "Culture": mr.get("culture"),
-                            "Essai": mr.get("essai"), "N° ligne": gi, **gr})
-            folder_sheets = {"Dossier": pd.DataFrame([meta]),
-                "Fiches techniques": pd.DataFrame([_clean_export_row(r) for r in attached_tech]),
-                "Fiches de mesure": pd.DataFrame([{k:v for k,v in _clean_export_row(r).items() if k != "grid"} for r in attached_measures]),
-                "Grilles de mesures": pd.DataFrame(attached_grid_rows)}
-            folder_summary = ([{"Type":"Fiche technique", "Code":r.get("code"), "Culture":r.get("culture"), "Date":r.get("date_collecte")} for r in attached_tech] +
-                              [{"Type":"Fiche de mesures", "Code":r.get("fiche_code"), "Culture":r.get("culture"), "Essai":r.get("essai"), "Date":r.get("date_mesure")} for r in attached_measures])
-            excel_sheets = folder_sheets
-            pdf_frame = pd.DataFrame(folder_summary or [{"Information":"Dossier sans fiche classée"}])
-            grid_rows = []
-        else:
-            grid_rows = record.get(grid_key) or []
-        if isinstance(grid_rows, str):
-            try: grid_rows = json.loads(grid_rows)
-            except Exception: grid_rows = []
-        if isinstance(grid_rows, dict): grid_rows = grid_rows.get("rows", grid_rows.get("data", [grid_rows]))
-        if include_grid:
-            grid_title = "Grille des observations expérimentales" if grid_key == "observations_periodiques" else "Grille de mesures enregistrée"
-            st.markdown(f"**{grid_title}**")
-            grid_frame = pd.DataFrame([x for x in grid_rows if isinstance(x, dict)] if isinstance(grid_rows, list) else [])
-            if grid_frame.empty:
-                st.warning("Cette fiche ne contient pas de grille de mesures enregistrée.")
-            else:
-                st.dataframe(grid_frame, use_container_width=True, hide_index=True)
-            excel_sheets = {label[:31]: pd.DataFrame([meta]), ("Grille observations" if grid_key == "observations_periodiques" else "Grille de mesures"): grid_frame}
-            pdf_frame = pd.DataFrame(grid_rows if isinstance(grid_rows, list) else [])
-            if not pdf_frame.empty:
-                pdf_frame.insert(0, "N° ligne", range(1, len(pdf_frame)+1))
-            else:
-                pdf_frame = pd.DataFrame([meta])
-        else:
-            excel_sheets = {label[:31]: pd.DataFrame([meta])}
-            pdf_frame = pd.DataFrame([meta])
-        safe_name = slugify(str(meta.get("code") or meta.get("fiche_code") or meta.get("folder_name") or meta.get("title") or prefix))
-        c1, c2 = st.columns(2)
-        c1.download_button("📊 Télécharger cet élément en Excel", excel_bytes(excel_sheets),
-            f"{prefix}_{safe_name}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-            key=f"{key}_xlsx", use_container_width=True)
-        c2.download_button("📄 Télécharger cet élément en PDF", pdf_bytes(label + " — " + safe_name, pdf_frame),
-            f"{prefix}_{safe_name}.pdf", "application/pdf", key=f"{key}_pdf", use_container_width=True)
+    def _plain(value):
+        if isinstance(value, (dict, list)):
+            return json.dumps(value, ensure_ascii=False, default=str)
+        return value
 
-    with export_tabs[0]:
-        st.dataframe(pd.DataFrame(tech), use_container_width=True, hide_index=True)
-        _download_selected_record("fiches techniques", tech, "export_one_technical", "FICHE_TECHNIQUE", include_grid=True, grid_key="observations_periodiques")
-    with export_tabs[1]:
-        st.dataframe(pd.DataFrame([{k:v for k,v in r.items() if k != "grid"} for r in measures]), use_container_width=True, hide_index=True)
-        _download_selected_record("fiches de mesure", measures, "export_one_measure", "FICHE_MESURE", include_grid=True)
-    with export_tabs[2]:
-        folders_export = db_rows("cra_culture_folders")
-        st.dataframe(pd.DataFrame(folders_export), use_container_width=True, hide_index=True)
-        if folders_export:
-            folder_labels = {f"{r.get('folder_code','')} · {r.get('culture','')} · {r.get('folder_name','Dossier')}": r for r in folders_export}
-            folder_label = st.selectbox("Sélectionner le dossier à télécharger", list(folder_labels), key="export_one_folder")
-            chosen_folder = folder_labels[folder_label]; chosen_id = chosen_folder.get("id")
-            related_tech = [r for r in tech if r.get("folder_id") == chosen_id]
-            related_measures = [r for r in measures if r.get("folder_id") == chosen_id]
-            tech_meta_rows = [{k:(json.dumps(v,ensure_ascii=False,default=str) if isinstance(v,(dict,list)) else v) for k,v in r.items() if k not in ("observations_periodiques","owner_email")} for r in related_tech]
-            tech_grid_rows = []; measure_meta_rows = []; measure_grid_rows = []
-            for r in related_tech:
-                rows = r.get("observations_periodiques") or []
-                if isinstance(rows,str):
-                    try: rows=json.loads(rows)
-                    except Exception: rows=[]
-                for i,row in enumerate(rows if isinstance(rows,list) else [],1):
-                    if isinstance(row,dict): tech_grid_rows.append({"Code fiche":r.get("code"),"N° ligne":i,**row})
-            for r in related_measures:
-                measure_meta_rows.append({k:(json.dumps(v,ensure_ascii=False,default=str) if isinstance(v,(dict,list)) else v) for k,v in r.items() if k not in ("grid","owner_email")})
-                rows = r.get("grid") or []
-                if isinstance(rows,str):
-                    try: rows=json.loads(rows)
-                    except Exception: rows=[]
-                for i,row in enumerate(rows if isinstance(rows,list) else [],1):
-                    if isinstance(row,dict): measure_grid_rows.append({"Code fiche":r.get("fiche_code"),"N° ligne":i,**row})
-            folder_meta = pd.DataFrame([{k:v for k,v in chosen_folder.items() if k != "owner_email"}])
-            st.caption(f"Contenu : {len(related_tech)} fiche(s) technique(s), {len(related_measures)} fiche(s) de mesure(s). Les deux grilles sont incluses.")
-            st.download_button("📊 Télécharger ce dossier en Excel (fiches + grilles)", excel_bytes({"Dossier":folder_meta,"Fiches techniques":pd.DataFrame(tech_meta_rows),"Grilles techniques":pd.DataFrame(tech_grid_rows),"Fiches de mesure":pd.DataFrame(measure_meta_rows),"Grilles de mesures":pd.DataFrame(measure_grid_rows)}), f"DOSSIER_{slugify(chosen_folder.get('folder_name','culture'))}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key="export_one_folder_xlsx")
-            folder_pdf_rows = [{"Rubrique":k,"Valeur":v} for k,v in chosen_folder.items() if k not in ("owner_email", "id")]
-            for r in tech_meta_rows:
-                folder_pdf_rows.append({"Rubrique":"Fiche technique · "+str(r.get("code","")),"Valeur":json.dumps(r,ensure_ascii=False,default=str)})
-            for r in measure_meta_rows:
-                folder_pdf_rows.append({"Rubrique":"Fiche de mesure · "+str(r.get("fiche_code","")),"Valeur":json.dumps(r,ensure_ascii=False,default=str)})
-            for r in tech_grid_rows: folder_pdf_rows.append({"Rubrique":"Grille technique · "+str(r.get("Code fiche"))+" · ligne "+str(r.get("N° ligne")),"Valeur":json.dumps(r,ensure_ascii=False,default=str)})
-            for r in measure_grid_rows: folder_pdf_rows.append({"Rubrique":"Grille mesure · "+str(r.get("Code fiche"))+" · ligne "+str(r.get("N° ligne")),"Valeur":json.dumps(r,ensure_ascii=False,default=str)})
-            st.download_button("📄 Télécharger ce dossier en PDF (avec les grilles)", pdf_bytes("DOSSIER DE CULTURE — "+str(chosen_folder.get("folder_name","")),pd.DataFrame(folder_pdf_rows)), f"DOSSIER_{slugify(chosen_folder.get('folder_name','culture'))}.pdf", "application/pdf", key="export_one_folder_pdf")
-        else: st.info("Aucun dossier de culture enregistré.")
-    with export_tabs[3]:
-        trials_export = trials + trial_obs
-        st.dataframe(pd.DataFrame(trials_export), use_container_width=True, hide_index=True)
-        _download_selected_record("essais et observations", trials_export, "export_one_trial_obs", "ESSAI_OBSERVATION")
-    with export_tabs[4]:
-        st.dataframe(pd.DataFrame(diagnostics), use_container_width=True, hide_index=True)
-        _download_selected_record("diagnostics phytosanitaires", diagnostics, "export_one_diagnostic", "DIAGNOSTIC")
-    with export_tabs[5]:
-        response_rows = []
-        response_records = []
-        for r in responses:
-            row = {"Questionnaire": r.get("form_title"), "Répondant": r.get("respondent"),
-                   "Contact": r.get("contact"), "Date": r.get("submitted_at")}
-            answer_values = r.get("answers") or {}
-            if not answer_values and r.get("answers_by_id"):
-                labels = r.get("question_labels") or {}
-                answer_values = {labels.get(k, k): v for k, v in r.get("answers_by_id", {}).items()}
-            row.update(answer_values)
-            response_rows.append(row)
-            response_records.append({**r, "answers": answer_values})
-        st.dataframe(pd.DataFrame(response_rows), use_container_width=True, hide_index=True)
-        _download_selected_record("réponses aux questionnaires", response_records, "export_one_response", "REPONSE_QUESTIONNAIRE")
+    def _clean(row):
+        return {k: _plain(v) for k, v in row.items() if k not in {"owner_email"}}
 
-
-    # Gestion CRUD transversale : rend disponibles modification et suppression
-    # pour les enregistrements des modules qui n'avaient pas encore ces boutons.
-    st.markdown("---")
-    st.markdown("### 🛠️ Modifier ou supprimer mes enregistrements")
-    st.caption("Sélectionnez un module puis un enregistrement. Les droits de propriété et de partage appliqués par la couche Supabase restent actifs. Les identifiants et propriétaires ne peuvent pas être modifiés ici.")
-    managed_tables = {
-        "Fiches techniques": "cra_technical_sheets",
-        "Fiches de mesure": "cra_measurement_sheets",
-        "Dossiers de culture": "cra_culture_folders",
-        "Cultures": "cra_cultures",
-        "Essais expérimentaux": "cra_trials",
-        "Observations d'essais": "cra_trial_observations",
-        "Diagnostics phytosanitaires": "cra_phytosanitary_diagnostics",
-        "Questionnaires": "cra_forms",
-        "Réponses aux questionnaires": "cra_responses",
-        "Brouillons de mesure": "cra_measurement_drafts",
-        "Partages / collaborations": "cra_collaboration",
-    }
-    with st.expander("Ouvrir la gestion des enregistrements", expanded=False):
-        selected_label = st.selectbox("Module à gérer", list(managed_tables), key="crud_table_label")
-        selected_table = managed_tables[selected_label]
-        try:
-            manageable_rows = db_rows(selected_table, 5000)
-            current_email = st.session_state.get("cra_user_email", "")
-            # Les éléments seulement partagés restent consultables mais ne sont
-            # pas proposés ici à la modification/suppression par un non-propriétaire.
-            manageable_rows = [r for r in manageable_rows
-                               if r.get("owner_email") == current_email
-                               or r.get("created_by") == current_email]
-        except Exception as exc:
-            manageable_rows = []
-            st.error(f"Lecture impossible pour {selected_label} : {exc}")
-        if not manageable_rows:
-            st.info("Aucun enregistrement accessible dans ce module.")
-        else:
-            def _crud_label(row):
-                title = (row.get("title") or row.get("name") or row.get("form_title") or
-                         row.get("folder_name") or row.get("trial_name") or row.get("reference") or
-                         row.get("respondent") or row.get("id"))
-                return f"{str(title)[:90]} — {str(row.get('id',''))[:8]}"
-            row_by_label = {_crud_label(r): r for r in manageable_rows}
-            chosen_label = st.selectbox("Enregistrement", list(row_by_label), key=f"crud_row_{selected_table}")
-            chosen_row = row_by_label[chosen_label]
-            editable = {k: v for k, v in chosen_row.items() if k not in {"id", "owner_email", "created_at"}}
-            edited_values = {}
-            with st.form(f"crud_edit_form_{selected_table}_{chosen_row.get('id')}"):
-                st.caption("Modifiez les champs ci-dessous. Les identifiants techniques et les droits de propriété sont protégés.")
-                for field_name, old_value in editable.items():
-                    label = field_name.replace("_", " ").strip().capitalize()
-                    widget_key = f"crud_field_{selected_table}_{chosen_row.get('id')}_{field_name}"
-                    if isinstance(old_value, bool):
-                        edited_values[field_name] = st.checkbox(label, value=old_value, key=widget_key)
-                    elif isinstance(old_value, (int, float)) and not isinstance(old_value, bool):
-                        edited_values[field_name] = st.number_input(label, value=old_value, key=widget_key)
-                    elif isinstance(old_value, list):
-                        initial_text = "\n".join(str(item) for item in old_value)
-                        edited_text = st.text_area(label + " (un élément par ligne)", value=initial_text, key=widget_key, height=100)
-                        edited_values[field_name] = [line.strip() for line in edited_text.splitlines() if line.strip()]
-                    elif isinstance(old_value, dict):
-                        # Les sous-objets restent inchangés dans cette interface simplifiée.
-                        edited_values[field_name] = old_value
-                        st.caption(f"{label} : sous-données conservées sans modification.")
-                    else:
-                        text_value = "" if old_value is None else str(old_value)
-                        if len(text_value) > 120 or "\n" in text_value:
-                            edited_values[field_name] = st.text_area(label, value=text_value, key=widget_key, height=100)
+    def _export_parts(records, module_label, nested_grid_fields=None):
+        """Crée des feuilles Excel distinctes pour les données principales et toutes les grilles imbriquées."""
+        nested_grid_fields = nested_grid_fields or {}
+        main_rows, nested_sheets = [], {}
+        for rec_no, record in enumerate(records, 1):
+            main_rows.append(_clean({k:v for k,v in record.items() if k not in nested_grid_fields}))
+            for field, sheet_label in nested_grid_fields.items():
+                rows = _as_rows(record.get(field))
+                if rows:
+                    target = nested_sheets.setdefault(sheet_label, [])
+                    for line_no, item in enumerate(rows, 1):
+                        if isinstance(item, dict):
+                            target.append({"Enregistrement": rec_no, "Code fiche": record.get("code") or record.get("fiche_code") or record.get("id"), "N° ligne": line_no, **{k:_plain(v) for k,v in item.items()}})
                         else:
-                            edited_values[field_name] = st.text_input(label, value=text_value, key=widget_key)
-                save_record = st.form_submit_button("💾 Enregistrer les modifications", type="primary", use_container_width=True)
-            if save_record:
-                try:
-                    if db_update(selected_table, str(chosen_row["id"]), edited_values):
-                        st.success("Modifications enregistrées.")
-                        st.rerun()
-                except Exception as exc:
-                    st.error(f"Modification impossible : {exc}")
-            st.markdown("#### Suppression")
-            confirm_delete = st.checkbox("Je confirme vouloir supprimer définitivement cet enregistrement.", key=f"crud_confirm_{selected_table}_{chosen_row.get('id')}")
-            if st.button("🗑️ Supprimer cet enregistrement", key=f"crud_delete_{selected_table}_{chosen_row.get('id')}", disabled=not confirm_delete, type="secondary", use_container_width=True):
-                try:
-                    DB.table(selected_table).delete().eq("id", str(chosen_row["id"])).execute()
-                    st.success("Enregistrement supprimé.")
+                            target.append({"Enregistrement": rec_no, "N° ligne": line_no, "Valeur": str(item)})
+        sheets = {str(module_label)[:31]: pd.DataFrame(main_rows)}
+        for name, rows in nested_sheets.items():
+            sheets[str(name)[:31]] = pd.DataFrame(rows)
+        # PDF en format vertical : métadonnées puis chaque ligne de grille en enregistrement lisible.
+        pdf_rows = []
+        for idx, record in enumerate(records, 1):
+            pdf_rows.append({"Rubrique": f"{module_label} — enregistrement {idx}", "Valeur": ""})
+            for key, value in record.items():
+                if key in {"owner_email"} or key in nested_grid_fields: continue
+                pdf_rows.append({"Rubrique": str(key).replace("_", " "), "Valeur": _plain(value)})
+            for field, sheet_label in nested_grid_fields.items():
+                rows = _as_rows(record.get(field))
+                if rows:
+                    pdf_rows.append({"Rubrique": sheet_label, "Valeur": f"{len(rows)} ligne(s)"})
+                    for line_no, item in enumerate(rows, 1):
+                        pdf_rows.append({"Rubrique": f"{sheet_label} · ligne {line_no}", "Valeur": _plain(item)})
+        return sheets, pd.DataFrame(pdf_rows or [{"Information":"Aucune donnée sélectionnée"}])
+
+    def _module_controls(label, table, records, key, prefix, nested_grid_fields=None, folder_mode=False):
+        """Affichage, sélection partielle, exports et modification au bas de chaque onglet."""
+        nested_grid_fields = nested_grid_fields or {}
+        st.markdown("#### Enregistrements disponibles")
+        search = st.text_input("Rechercher dans cet onglet", key=f"{key}_search", placeholder="Code, culture, titre, dossier…")
+        visible = records
+        if search.strip():
+            q = search.casefold()
+            visible = [r for r in records if q in json.dumps(r, ensure_ascii=False, default=str).casefold()]
+        if not visible:
+            st.info("Aucun enregistrement ne correspond à cette recherche.")
+            return
+        display_rows = [{k:_plain(v) for k,v in r.items() if k not in {"owner_email"} and not isinstance(v, (dict,list))} for r in visible]
+        st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+        def _label(r):
+            title = r.get("code") or r.get("fiche_code") or r.get("folder_code") or r.get("folder_name") or r.get("trial_name") or r.get("title") or r.get("form_title") or r.get("respondent") or r.get("name") or str(r.get("id",""))
+            return f"{title} · {str(r.get('culture',''))} · {str(r.get('id',''))[:8]}"
+        by_label = {_label(r):r for r in visible}
+        selected_labels = st.multiselect("Téléchargement partiel — sélectionnez un ou plusieurs éléments", list(by_label), key=f"{key}_partial")
+        selected_records = [by_label[x] for x in selected_labels]
+
+        # Pour un dossier, les exports contiennent le dossier, ses fiches et toutes les grilles liées.
+        if folder_mode and selected_records:
+            expanded = []
+            for folder in selected_records:
+                fid = folder.get("id")
+                child_tech = [r for r in tech if r.get("folder_id") == fid]
+                child_measure = [r for r in measures if r.get("folder_id") == fid]
+                expanded.extend(child_tech + child_measure)
+            folder_sheets = {"Dossiers":pd.DataFrame([_clean(x) for x in selected_records])}
+            for rec in expanded:
+                kind = "Fiches techniques" if rec in tech else "Fiches de mesure"
+                nested = {"observations_periodiques":"Grilles techniques"} if kind == "Fiches techniques" else {"grid":"Grilles de mesures"}
+                sub_sheets, _ = _export_parts([rec], kind, nested)
+                for nm, frame in sub_sheets.items():
+                    if nm in folder_sheets: folder_sheets[nm] = pd.concat([folder_sheets[nm], frame], ignore_index=True)
+                    else: folder_sheets[nm] = frame
+            pdf_rows = []
+            for f in selected_records:
+                pdf_rows.extend([{"Rubrique":"DOSSIER", "Valeur":_plain(_clean(f))}])
+                fid=f.get("id")
+                for r in [x for x in tech if x.get("folder_id")==fid] + [x for x in measures if x.get("folder_id")==fid]:
+                    istech = r in tech
+                    grid_field = "observations_periodiques" if istech else "grid"
+                    pdf_rows.append({"Rubrique":"Fiche technique" if istech else "Fiche de mesure", "Valeur":_plain({k:v for k,v in r.items() if k not in {"owner_email",grid_field}})})
+                    for i, gr in enumerate(_as_rows(r.get(grid_field)),1): pdf_rows.append({"Rubrique":f"Grille · ligne {i}","Valeur":_plain(gr)})
+            xlsx_payload = excel_bytes(folder_sheets)
+            pdf_payload = pdf_bytes("Dossiers de culture sélectionnés", pd.DataFrame(pdf_rows or [{"Information":"Aucun dossier sélectionné"}]))
+        elif selected_records:
+            xlsx_sheets, pdf_frame = _export_parts(selected_records, label, nested_grid_fields)
+            xlsx_payload = excel_bytes(xlsx_sheets)
+            pdf_payload = pdf_bytes(label + " — sélection", pdf_frame)
+        else:
+            xlsx_payload = pdf_payload = None
+            st.caption("Sélectionnez un ou plusieurs éléments pour activer les téléchargements partiels.")
+
+        st.markdown("#### Modifier / classer une fiche")
+        editable_records = [r for r in visible if r.get("owner_email") == st.session_state.get("cra_user_email") or r.get("created_by") == st.session_state.get("cra_user_email")]
+        if editable_records:
+            edit_map = {_label(r):r for r in editable_records}
+            edit_label = st.selectbox("Fiche à modifier", list(edit_map), key=f"{key}_edit_choice")
+            edit_record = edit_map[edit_label]
+            editable_fields = {k:v for k,v in edit_record.items() if k not in {"id","owner_email","created_at"}}
+            edits = {}
+            with st.form(f"{key}_edit_form_{edit_record.get('id')}"):
+                st.caption("Les champs imbriqués (grilles, réponses, questions) sont modifiables au format JSON ; les autres champs utilisent des contrôles simples.")
+                for field, old in editable_fields.items():
+                    label_field = field.replace("_", " ").capitalize()
+                    widget_key = f"{key}_edit_{edit_record.get('id')}_{field}"
+                    if isinstance(old, bool): edits[field] = st.checkbox(label_field, value=old, key=widget_key)
+                    elif isinstance(old, (int,float)) and not isinstance(old,bool): edits[field] = st.number_input(label_field, value=old, key=widget_key)
+                    elif isinstance(old, (dict,list)):
+                        raw = json.dumps(old, ensure_ascii=False, indent=2, default=str)
+                        edited = st.text_area(label_field + " (JSON)", value=raw, key=widget_key, height=140)
+                        try: edits[field] = json.loads(edited)
+                        except Exception: edits[field] = old; st.warning(f"Le JSON du champ « {label_field} » est invalide : ancienne valeur conservée.")
+                    else:
+                        text = "" if old is None else str(old)
+                        if len(text)>100 or "\n" in text: edits[field]=st.text_area(label_field, value=text, key=widget_key, height=90)
+                        else: edits[field]=st.text_input(label_field, value=text, key=widget_key)
+                if table in {"cra_technical_sheets","cra_measurement_sheets"} and folders_export:
+                    folder_opts = {"— Sans dossier —":None}
+                    folder_opts.update({f"{f.get('folder_code','')} · {f.get('culture','')} · {f.get('folder_name','Dossier')}":f.get("id") for f in folders_export})
+                    current_id = edit_record.get("folder_id")
+                    labels = list(folder_opts)
+                    default_idx = next((i for i,(nm,fid) in enumerate(folder_opts.items()) if fid==current_id),0)
+                    chosen_folder_label = st.selectbox("Classer / déplacer dans le dossier", labels, index=default_idx, key=f"{key}_folder_{edit_record.get('id')}")
+                    edits["folder_id"] = folder_opts[chosen_folder_label]
+                    edits["folder_name"] = next((f.get("folder_name") for f in folders_export if f.get("id")==edits["folder_id"]), None)
+                save = st.form_submit_button("💾 Enregistrer les modifications", type="primary", use_container_width=True)
+            if save:
+                if db_update(table, str(edit_record.get("id")), edits):
+                    st.success("Fiche modifiée et classement enregistré.")
                     st.rerun()
-                except Exception as exc:
-                    st.error(f"Suppression impossible : {exc}")
+        else:
+            st.info("Aucune fiche modifiable dans cette sélection : seuls les enregistrements dont vous êtes propriétaire sont modifiables.")
+
+        st.markdown("#### Télécharger la sélection")
+        c1,c2 = st.columns(2)
+        with c1:
+            st.download_button("📊 Excel — sélection + grilles", xlsx_payload or b"", f"{prefix}_SELECTION.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"{key}_xlsx", use_container_width=True, disabled=not selected_records)
+        with c2:
+            st.download_button("📄 PDF — sélection + grilles", pdf_payload or b"", f"{prefix}_SELECTION.pdf", "application/pdf", key=f"{key}_pdf", use_container_width=True, disabled=not selected_records)
+
+    st.markdown("### 📦 Export intégral (facultatif)")
+    all_measure_grid_rows=[]
+    for mr in measures:
+        for gi, gr in enumerate(_as_rows(mr.get("grid")),1):
+            if isinstance(gr,dict): all_measure_grid_rows.append({"Code fiche":mr.get("fiche_code"),"Culture":mr.get("culture"),"N° ligne":gi,**gr})
+    all_tech_grid_rows=[]
+    for tr in tech:
+        for gi, gr in enumerate(_as_rows(tr.get("observations_periodiques")),1):
+            if isinstance(gr,dict): all_tech_grid_rows.append({"Code fiche":tr.get("code"),"Culture":tr.get("culture"),"N° ligne":gi,**gr})
+    all_sheets={
+        "Fiches techniques":pd.DataFrame([_clean({k:v for k,v in r.items() if k!="observations_periodiques"}) for r in tech]),
+        "Grilles techniques":pd.DataFrame(all_tech_grid_rows),
+        "Fiches de mesure":pd.DataFrame([_clean({k:v for k,v in r.items() if k!="grid"}) for r in measures]),
+        "Grilles de mesures":pd.DataFrame(all_measure_grid_rows),
+        "Dossiers":pd.DataFrame([_clean(x) for x in folders_export]),
+        "Essais":pd.DataFrame([_clean(x) for x in trials]),
+        "Observations essais":pd.DataFrame([_clean(x) for x in trial_obs]),
+        "Diagnostics":pd.DataFrame([_clean(x) for x in diagnostics]),
+        "Questionnaires":pd.DataFrame([_clean(x) for x in forms]),
+        "Réponses":pd.DataFrame([_clean(x) for x in responses]),
+        "Cultures":pd.DataFrame([_clean(x) for x in cultures]),
+    }
+    st.download_button("📚 Télécharger l'espace complet (Excel)", excel_bytes(all_sheets), "ISRA_CRA_ESPACE_COMPLET.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+
+    export_tabs=st.tabs(["Fiches techniques", "Fiches de mesure", "Dossiers de culture", "Essais", "Observations d’essais", "Diagnostics", "Questionnaires", "Réponses aux questionnaires"])
+    with export_tabs[0]:
+        _module_controls("Fiches techniques", "cra_technical_sheets", tech, "tab_tech", "FICHES_TECHNIQUES", {"observations_periodiques":"Grilles techniques"})
+    with export_tabs[1]:
+        _module_controls("Fiches de mesure", "cra_measurement_sheets", measures, "tab_measure", "FICHES_MESURE", {"grid":"Grilles de mesures"})
+    with export_tabs[2]:
+        st.info("Un dossier regroupe ses fiches techniques et ses fiches de mesure. Sélectionnez le dossier : l'export récupère automatiquement les fiches classées et leurs grilles.")
+        _module_controls("Dossiers de culture", "cra_culture_folders", folders_export, "tab_folders", "DOSSIERS_CULTURE", folder_mode=True)
+    with export_tabs[3]:
+        _module_controls("Essais expérimentaux", "cra_trials", trials, "tab_trials", "ESSAIS", {"observations":"Grilles observations","grid":"Grilles essais"})
+    with export_tabs[4]:
+        _module_controls("Observations d’essais", "cra_trial_observations", trial_obs, "tab_trial_obs", "OBSERVATIONS_ESSAIS", {"grid":"Grilles observations","measurements":"Grilles mesures"})
+    with export_tabs[5]:
+        _module_controls("Diagnostics phytosanitaires", "cra_phytosanitary_diagnostics", diagnostics, "tab_diagnostics", "DIAGNOSTICS", {"observations":"Grilles observations","symptoms":"Symptômes détaillés","grid":"Grille diagnostic"})
+    with export_tabs[6]:
+        _module_controls("Questionnaires", "cra_forms", forms, "tab_forms", "QUESTIONNAIRES", {"questions":"Grilles questions"})
+    with export_tabs[7]:
+        response_records=[]
+        for r in responses:
+            answers=r.get("answers") or {}
+            if not answers and r.get("answers_by_id"):
+                labels=r.get("question_labels") or {}
+                answers={labels.get(k,k):v for k,v in r.get("answers_by_id",{}).items()}
+            response_records.append({**r,"answers":answers})
+        _module_controls("Réponses aux questionnaires", "cra_responses", response_records, "tab_responses", "REPONSES_QUESTIONNAIRES", {"answers":"Grilles réponses","answers_by_id":"Réponses par identifiant"})
 
 # ---------------------------------------------------------------------
 # GESTION DES COMPTES
