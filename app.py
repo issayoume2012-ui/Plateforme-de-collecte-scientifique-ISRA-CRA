@@ -2356,53 +2356,162 @@ elif page == "Données et exports":
     </style>""", unsafe_allow_html=True)
 
     def _as_rows(value):
+        """Normalise une grille quelle que soit sa représentation en base."""
+        if value is None or value == "":
+            return []
         if isinstance(value, str):
-            try: value = json.loads(value)
-            except Exception: return []
+            try:
+                value = json.loads(value)
+            except Exception:
+                # Une chaîne libre (symptômes, protocole, commentaire) n'est pas une grille.
+                return []
         if isinstance(value, dict):
-            value = value.get("rows", value.get("data", [value]))
-        return value if isinstance(value, list) else []
+            # Formats historiques : {rows:[...]}, {data:[...]}, ou dictionnaire-ligne.
+            for key in ("rows", "data", "records", "items", "values"):
+                if isinstance(value.get(key), (list, dict)):
+                    return _as_rows(value[key])
+            return [value]
+        if isinstance(value, list):
+            result = []
+            for item in value:
+                if isinstance(item, dict):
+                    result.append(item)
+                elif isinstance(item, (list, tuple)):
+                    result.append({f"Colonne {i+1}": v for i, v in enumerate(item)})
+                else:
+                    result.append({"Valeur": item})
+            return result
+        return [{"Valeur": value}]
 
     def _plain(value):
-        if isinstance(value, (dict, list)):
+        if isinstance(value, (dict, list, tuple)):
             return json.dumps(value, ensure_ascii=False, default=str)
+        if value is None:
+            return ""
         return value
 
     def _clean(row):
         return {k: _plain(v) for k, v in row.items() if k not in {"owner_email"}}
 
+    def _safe_sheet_name(name, used):
+        base = re.sub(r"[\[\]:*?/\\]", "_", str(name)).strip()[:31] or "Données"
+        candidate, n = base, 2
+        while candidate in used:
+            suffix = f"_{n}"
+            candidate = base[:31-len(suffix)] + suffix
+            n += 1
+        used.add(candidate)
+        return candidate
+
     def _export_parts(records, module_label, nested_grid_fields=None):
-        """Crée des feuilles Excel distinctes pour les données principales et toutes les grilles imbriquées."""
+        """Construit un classeur fidèle : métadonnées + vraies grilles tabulaires."""
         nested_grid_fields = nested_grid_fields or {}
-        main_rows, nested_sheets = [], {}
+        main_rows, grid_rows = [], {}
         for rec_no, record in enumerate(records, 1):
-            main_rows.append(_clean({k:v for k,v in record.items() if k not in nested_grid_fields}))
+            parsed_grids = {field: _as_rows(record.get(field)) for field in nested_grid_fields}
+            # Ne retire du tableau principal que les champs réellement structurés en grille.
+            grid_fields_present = {field for field, rows in parsed_grids.items() if rows}
+            main = {k: _plain(v) for k, v in record.items()
+                    if k not in grid_fields_present and k != "owner_email"}
+            main_rows.append(main)
+            identity = record.get("code") or record.get("fiche_code") or record.get("folder_code") or record.get("id") or rec_no
             for field, sheet_label in nested_grid_fields.items():
-                rows = _as_rows(record.get(field))
-                if rows:
-                    target = nested_sheets.setdefault(sheet_label, [])
-                    for line_no, item in enumerate(rows, 1):
-                        if isinstance(item, dict):
-                            target.append({"Enregistrement": rec_no, "Code fiche": record.get("code") or record.get("fiche_code") or record.get("id"), "N° ligne": line_no, **{k:_plain(v) for k,v in item.items()}})
-                        else:
-                            target.append({"Enregistrement": rec_no, "N° ligne": line_no, "Valeur": str(item)})
-        sheets = {str(module_label)[:31]: pd.DataFrame(main_rows)}
-        for name, rows in nested_sheets.items():
+                rows = parsed_grids[field]
+                if not rows:
+                    continue
+                target = grid_rows.setdefault(sheet_label, [])
+                for line_no, item in enumerate(rows, 1):
+                    target.append({"Référence fiche": str(identity), "N° ligne": line_no,
+                                   **{str(k): _plain(v) for k, v in item.items()}})
+        sheets = {str(module_label)[:31]: pd.DataFrame(main_rows or [{"Information": "Aucun enregistrement"}])}
+        for name, rows in grid_rows.items():
             sheets[str(name)[:31]] = pd.DataFrame(rows)
-        # PDF en format vertical : métadonnées puis chaque ligne de grille en enregistrement lisible.
-        pdf_rows = []
-        for idx, record in enumerate(records, 1):
-            pdf_rows.append({"Rubrique": f"{module_label} — enregistrement {idx}", "Valeur": ""})
-            for key, value in record.items():
-                if key in {"owner_email"} or key in nested_grid_fields: continue
-                pdf_rows.append({"Rubrique": str(key).replace("_", " "), "Valeur": _plain(value)})
-            for field, sheet_label in nested_grid_fields.items():
-                rows = _as_rows(record.get(field))
-                if rows:
-                    pdf_rows.append({"Rubrique": sheet_label, "Valeur": f"{len(rows)} ligne(s)"})
-                    for line_no, item in enumerate(rows, 1):
-                        pdf_rows.append({"Rubrique": f"{sheet_label} · ligne {line_no}", "Valeur": _plain(item)})
-        return sheets, pd.DataFrame(pdf_rows or [{"Information":"Aucune donnée sélectionnée"}])
+        # PDF : métadonnées lisibles et chaque grille présentée comme une vraie matrice.
+        return sheets, None
+
+    def _records_pdf_bytes(title, records, nested_grid_fields=None):
+        """PDF fidèle avec les champs de la fiche puis les grilles en tableaux paginables."""
+        from reportlab.lib import colors
+        from reportlab.lib.pagesizes import A4, landscape
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.lib.enums import TA_CENTER
+        from reportlab.lib.units import mm
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, LongTable, TableStyle, KeepTogether
+        from xml.sax.saxutils import escape
+
+        out = BytesIO()
+        doc = SimpleDocTemplate(out, pagesize=landscape(A4), rightMargin=10*mm, leftMargin=10*mm,
+                                topMargin=22*mm, bottomMargin=18*mm, title=str(title),
+                                author="ISRA — CRA Saint-Louis")
+        styles = getSampleStyleSheet()
+        title_style = ParagraphStyle("ExportTitle", parent=styles["Title"], fontSize=16, leading=19,
+                                     alignment=TA_CENTER, textColor=colors.HexColor("#16483F"), spaceAfter=5)
+        small = ParagraphStyle("ExportCell", parent=styles["BodyText"], fontSize=7, leading=8.5,
+                               wordWrap="CJK", splitLongWords=1, spaceAfter=0)
+        head = ParagraphStyle("ExportHead", parent=small, fontName="Helvetica-Bold", textColor=colors.white)
+        story = [Paragraph("INSTITUT SÉNÉGALAIS DE RECHERCHES AGRICOLES — ISRA", styles["Heading3"]),
+                 Paragraph("CENTRE DE RECHERCHES AGRICOLES — SAINT-LOUIS", styles["Heading3"]),
+                 Paragraph(escape(str(title)), title_style),
+                 Paragraph(f"Export du {datetime.now().strftime('%d/%m/%Y à %H:%M')}", small), Spacer(1, 5*mm)]
+        nested_grid_fields = nested_grid_fields or {}
+        if not records:
+            records = []
+            story.append(Paragraph("Aucun enregistrement sélectionné.", styles["BodyText"]))
+        for rec_no, rec in enumerate(records, 1):
+            ref = rec.get("code") or rec.get("fiche_code") or rec.get("folder_code") or rec.get("title") or rec.get("id") or rec_no
+            story.append(Paragraph(f"<b>{escape(str(ref))}</b> — {escape(str(rec.get('culture') or ''))}", styles["Heading2"]))
+            fields = [[Paragraph("Champ", head), Paragraph("Valeur", head)]]
+            parsed_grids = {field: _as_rows(rec.get(field)) for field in nested_grid_fields}
+            for key, value in rec.items():
+                if key == "owner_email" or (key in nested_grid_fields and parsed_grids.get(key)):
+                    continue
+                val = _plain(value)
+                val_text = escape(str(val)).replace("\n", "<br/>")
+                fields.append([Paragraph(escape(str(key).replace("_", " ")), small),
+                               Paragraph(val_text or "—", small)])
+            if len(fields) > 1:
+                t = LongTable(fields, colWidths=[48*mm, doc.width-48*mm], repeatRows=1, splitByRow=1)
+                t.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#247A66")),
+                                       ("GRID",(0,0),(-1,-1),.35,colors.HexColor("#9CCDBD")),
+                                       ("BACKGROUND",(0,1),(0,-1),colors.HexColor("#EFF9F5")),
+                                       ("VALIGN",(0,0),(-1,-1),"TOP"),
+                                       ("LEFTPADDING",(0,0),(-1,-1),4), ("RIGHTPADDING",(0,0),(-1,-1),4)]))
+                story.append(t)
+            for field, grid_title in nested_grid_fields.items():
+                grid = parsed_grids.get(field) or []
+                if not grid:
+                    continue
+                story.extend([Spacer(1, 3*mm), Paragraph(f"<b>{escape(str(grid_title))}</b> — {len(grid)} ligne(s)", styles["Heading3"])])
+                columns = list(dict.fromkeys(k for row in grid for k in row.keys()))
+                if not columns:
+                    continue
+                matrix = [[Paragraph(escape(str(c)), head) for c in columns]]
+                for row in grid:
+                    matrix.append([Paragraph(escape(str(_plain(row.get(c, "")))), small) for c in columns])
+                widths = [doc.width / len(columns)] * len(columns)
+                gt = LongTable(matrix, colWidths=widths, repeatRows=1, splitByRow=1)
+                gt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#247A66")),
+                                        ("GRID",(0,0),(-1,-1),.35,colors.HexColor("#9CCDBD")),
+                                        ("VALIGN",(0,0),(-1,-1),"TOP"),
+                                        ("LEFTPADDING",(0,0),(-1,-1),3), ("RIGHTPADDING",(0,0),(-1,-1),3)]))
+                story.append(gt)
+            story.append(Spacer(1, 6*mm))
+
+        def decorate(canvas, document):
+            canvas.saveState(); w, h = landscape(A4)
+            canvas.setFillColor(colors.HexColor("#16483F")); canvas.rect(0, h-12*mm, w, 12*mm, fill=1, stroke=0)
+            canvas.setFillColor(colors.white); canvas.setFont("Helvetica-Bold", 8)
+            canvas.drawString(10*mm, h-8*mm, "ISRA | CRA SAINT-LOUIS")
+            canvas.setStrokeColor(colors.HexColor("#DDB64C")); canvas.line(10*mm, 13*mm, w-10*mm, 13*mm)
+            canvas.setFillColor(colors.HexColor("#16483F")); canvas.setFont("Helvetica", 7)
+            canvas.drawString(10*mm, 7*mm, "YAM GROUP — YAM NUMÉRIQUE")
+            canvas.drawRightString(w-10*mm, 7*mm, f"Page {document.page}")
+            canvas.restoreState()
+        doc.build(story, onFirstPage=decorate, onLaterPages=decorate)
+        data = out.getvalue()
+        if not data.startswith(b"%PDF"):
+            raise ValueError("Le PDF généré est vide ou invalide.")
+        return data
 
     def _module_controls(label, table, records, key, prefix, nested_grid_fields=None, folder_mode=False):
         """Affichage, sélection partielle, exports et modification au bas de chaque onglet."""
@@ -2441,21 +2550,21 @@ elif page == "Données et exports":
                 for nm, frame in sub_sheets.items():
                     if nm in folder_sheets: folder_sheets[nm] = pd.concat([folder_sheets[nm], frame], ignore_index=True)
                     else: folder_sheets[nm] = frame
-            pdf_rows = []
+            pdf_records = []
+            pdf_grid_fields = {"observations_periodiques":"Grilles techniques", "grid":"Grilles de mesures"}
             for f in selected_records:
-                pdf_rows.extend([{"Rubrique":"DOSSIER", "Valeur":_plain(_clean(f))}])
-                fid=f.get("id")
-                for r in [x for x in tech if x.get("folder_id")==fid] + [x for x in measures if x.get("folder_id")==fid]:
-                    istech = r in tech
-                    grid_field = "observations_periodiques" if istech else "grid"
-                    pdf_rows.append({"Rubrique":"Fiche technique" if istech else "Fiche de mesure", "Valeur":_plain({k:v for k,v in r.items() if k not in {"owner_email",grid_field}})})
-                    for i, gr in enumerate(_as_rows(r.get(grid_field)),1): pdf_rows.append({"Rubrique":f"Grille · ligne {i}","Valeur":_plain(gr)})
+                pdf_records.append({"Type":"DOSSIER", **f})
+                fid = f.get("id")
+                for r in [x for x in tech if x.get("folder_id") == fid]:
+                    pdf_records.append({"Type":"Fiche technique", **r})
+                for r in [x for x in measures if x.get("folder_id") == fid]:
+                    pdf_records.append({"Type":"Fiche de mesure", **r})
             xlsx_payload = excel_bytes(folder_sheets)
-            pdf_payload = pdf_bytes("Dossiers de culture sélectionnés", pd.DataFrame(pdf_rows or [{"Information":"Aucun dossier sélectionné"}]))
+            pdf_payload = _records_pdf_bytes("Dossiers de culture sélectionnés", pdf_records, pdf_grid_fields)
         elif selected_records:
-            xlsx_sheets, pdf_frame = _export_parts(selected_records, label, nested_grid_fields)
+            xlsx_sheets, _ = _export_parts(selected_records, label, nested_grid_fields)
             xlsx_payload = excel_bytes(xlsx_sheets)
-            pdf_payload = pdf_bytes(label + " — sélection", pdf_frame)
+            pdf_payload = _records_pdf_bytes(label + " — sélection", selected_records, nested_grid_fields)
         else:
             xlsx_payload = pdf_payload = None
             st.caption("Sélectionnez un ou plusieurs éléments pour activer les téléchargements partiels.")
@@ -2541,7 +2650,7 @@ elif page == "Données et exports":
         st.info("Un dossier regroupe ses fiches techniques et ses fiches de mesure. Sélectionnez le dossier : l'export récupère automatiquement les fiches classées et leurs grilles.")
         _module_controls("Dossiers de culture", "cra_culture_folders", folders_export, "tab_folders", "DOSSIERS_CULTURE", folder_mode=True)
     with export_tabs[3]:
-        _module_controls("Essais expérimentaux", "cra_trials", trials, "tab_trials", "ESSAIS", {"observations":"Grilles observations","grid":"Grilles essais"})
+        _module_controls("Essais expérimentaux", "cra_trials", trials, "tab_trials", "ESSAIS", {"modalities":"Grille des modalités","observations":"Grilles observations","grid":"Grilles essais"})
     with export_tabs[4]:
         _module_controls("Observations d’essais", "cra_trial_observations", trial_obs, "tab_trial_obs", "OBSERVATIONS_ESSAIS", {"grid":"Grilles observations","measurements":"Grilles mesures"})
     with export_tabs[5]:
