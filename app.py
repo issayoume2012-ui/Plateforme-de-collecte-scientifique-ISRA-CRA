@@ -1648,6 +1648,12 @@ elif page == "Fiche de mesure":
 
     if save_measure:
         final_payload=dict(metadata)
+        # Copie explicite de la grille éditée : les cellules du data_editor deviennent
+        # une liste de dictionnaires JSONB attachée à CETTE fiche, pas au brouillon partagé.
+        final_payload["grid"] = edited_grid.fillna("").to_dict(orient="records")
+        final_payload["headers"] = [str(c) for c in edited_grid.columns]
+        final_payload["ncols"] = len(edited_grid.columns)
+        final_payload["nrows"] = len(edited_grid.index)
         final_payload["fiche_code"]=f"FM-{uuid.uuid4().hex[:10].upper()}"
         final_payload["folder_id"]=measure_folder_id
         final_payload["folder_name"]=measure_folder_name
@@ -2391,7 +2397,7 @@ elif page == "Données et exports":
     </style>""", unsafe_allow_html=True)
 
     def _as_rows(value):
-        """Normalise les grilles historiques et élimine uniquement les lignes entièrement vides."""
+        """Normalise une grille, y compris les formats JSON historiques et les grilles imbriquées."""
         if value is None:
             return []
         if isinstance(value, str):
@@ -2400,19 +2406,30 @@ elif page == "Données et exports":
             try:
                 value = json.loads(value)
             except Exception:
-                # Une chaîne libre (symptômes, protocole, commentaire) n'est pas une grille.
                 return []
         if isinstance(value, pd.DataFrame):
             value = value.to_dict(orient="records")
         if isinstance(value, dict):
-            # Formats historiques : {rows:[...]}, {data:[...]}, ou dictionnaire-ligne.
-            for key in ("rows", "data", "records", "items", "values"):
-                if isinstance(value.get(key), (list, dict)):
-                    return _as_rows(value[key])
+            # Enregistrements anciens : grille dans payload / grid / rows / data / records.
+            for key in ("payload", "grid", "rows", "data", "records", "items", "values"):
+                nested = value.get(key)
+                if isinstance(nested, str):
+                    try:
+                        nested = json.loads(nested)
+                    except Exception:
+                        nested = None
+                if isinstance(nested, (list, tuple, dict, pd.DataFrame)):
+                    return _as_rows(nested)
             candidates = [value]
         elif isinstance(value, (list, tuple)):
             candidates = []
             for item in value:
+                if isinstance(item, str):
+                    try:
+                        parsed = json.loads(item)
+                        item = parsed if isinstance(parsed, (dict, list, tuple)) else item
+                    except Exception:
+                        pass
                 if isinstance(item, dict):
                     candidates.append(item)
                 elif isinstance(item, (list, tuple)):
@@ -2424,8 +2441,9 @@ elif page == "Données et exports":
 
         result = []
         for row in candidates:
-            cleaned = {}
-            has_content = False
+            if not isinstance(row, dict):
+                continue
+            cleaned, has_content = {}, False
             for key, cell in row.items():
                 if cell is None or (isinstance(cell, str) and not cell.strip()):
                     cleaned[str(key)] = ""
@@ -2437,10 +2455,22 @@ elif page == "Données et exports":
                 except Exception:
                     pass
                 cleaned[str(key)] = cell
-                has_content = True  # conserve notamment 0 et False
+                has_content = True  # 0 et False sont des valeurs renseignées
             if has_content:
                 result.append(cleaned)
         return result
+
+    def _record_grid(record, field):
+        """Récupère la grille depuis le champ métier ou les enveloppes JSON historiques."""
+        value = record.get(field)
+        if value in (None, "") and isinstance(record.get("payload"), dict):
+            value = record["payload"].get(field)
+        if value in (None, "") and isinstance(record.get("payload"), str):
+            try:
+                value = json.loads(record["payload"]).get(field)
+            except Exception:
+                pass
+        return _as_rows(value)
 
     def _is_structured_grid(value):
         """Vrai uniquement pour une grille structurée, jamais pour un texte libre."""
@@ -2510,7 +2540,7 @@ elif page == "Données et exports":
             for field, grid_title in nested_grid_fields.items():
                 if not _is_structured_grid(record.get(field)):
                     continue  # conserve les champs texte libres dans les informations générales
-                grid = _as_rows(record.get(field))
+                grid = _record_grid(record, field)
                 rows.append({"Champ": str(grid_title).upper(), "Valeur": f"{len(grid)} ligne(s) renseignée(s)"})
                 if not grid:
                     rows.append({"Champ": "État de la grille", "Valeur": "Aucune ligne renseignée dans cette fiche."})
@@ -2565,7 +2595,7 @@ elif page == "Données et exports":
             ref = rec.get("code") or rec.get("fiche_code") or rec.get("folder_code") or rec.get("title") or rec.get("id") or rec_no
             story.append(Paragraph(f"<b>{escape(str(ref))}</b> — {escape(str(rec.get('culture') or ''))}", styles["Heading2"]))
             fields = [[Paragraph("Champ", head), Paragraph("Valeur", head)]]
-            parsed_grids = {field: (_as_rows(rec.get(field)) if _is_structured_grid(rec.get(field)) else []) for field in nested_grid_fields}
+            parsed_grids = {field: _record_grid(rec, field) for field in nested_grid_fields}
             for key, value in rec.items():
                 if key == "owner_email" or (key in nested_grid_fields and parsed_grids.get(key)):
                     continue
@@ -2757,11 +2787,11 @@ elif page == "Données et exports":
     st.markdown("### 📦 Export intégral (facultatif)")
     all_measure_grid_rows=[]
     for mr in measures:
-        for gi, gr in enumerate(_as_rows(mr.get("grid")),1):
+        for gi, gr in enumerate(_record_grid(mr, "grid"),1):
             if isinstance(gr,dict): all_measure_grid_rows.append({"Code fiche":mr.get("fiche_code"),"Culture":mr.get("culture"),"N° ligne":gi,**gr})
     all_tech_grid_rows=[]
     for tr in tech:
-        for gi, gr in enumerate(_as_rows(tr.get("observations_periodiques")),1):
+        for gi, gr in enumerate(_record_grid(tr, "observations_periodiques"),1):
             if isinstance(gr,dict): all_tech_grid_rows.append({"Code fiche":tr.get("code"),"Culture":tr.get("culture"),"N° ligne":gi,**gr})
     all_sheets={
         "Fiches techniques":pd.DataFrame([_clean({k:v for k,v in r.items() if k!="observations_periodiques"}) for r in tech]),
