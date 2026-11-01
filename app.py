@@ -748,6 +748,82 @@ def pdf_bytes(title: str, frame: pd.DataFrame) -> bytes:
         return b""
 
 
+def _normalize_grid_rows(value: Any) -> list[dict]:
+    """Normalise les grilles natives, JSON et anciens formats tabulaires."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw = value.strip()
+        if not raw:
+            return []
+        try:
+            value = json.loads(raw)
+        except Exception:
+            try:
+                from io import StringIO
+                value = pd.read_csv(StringIO(raw), sep=None, engine="python").to_dict(orient="records")
+            except Exception:
+                return [{"Valeur": value}]
+    if isinstance(value, pd.DataFrame):
+        return value.fillna("").to_dict(orient="records")
+    if isinstance(value, dict):
+        headers = value.get("headers") or value.get("columns") or value.get("colonnes")
+        for key in ("rows", "data", "records", "items", "values", "grid",
+                    "observations_periodiques", "payload"):
+            nested = value.get(key)
+            if nested is not None and nested is not value:
+                parsed = _normalize_grid_rows(nested)
+                if parsed:
+                    if headers and isinstance(headers, (list, tuple)):
+                        names = [str(h) for h in headers]
+                        converted = []
+                        for row in parsed:
+                            if all(f"Colonne {i+1}" in row for i in range(len(names))):
+                                converted.append({name:row.get(f"Colonne {i+1}","")
+                                                  for i,name in enumerate(names)})
+                            else:
+                                converted.append({name: row.get(name, "") for name in names} |
+                                                 {k:v for k,v in row.items() if k not in names})
+                        return converted
+                    return parsed
+        if all(not isinstance(v, (dict, list, tuple)) for v in value.values()):
+            return [value]
+        return []
+    if isinstance(value, (list, tuple)):
+        rows = []
+        for item in value:
+            if isinstance(item, str):
+                try: item = json.loads(item)
+                except Exception: pass
+            if isinstance(item, dict):
+                row = item
+            elif isinstance(item, (list, tuple)):
+                row = {f"Colonne {i+1}": v for i,v in enumerate(item)}
+            else:
+                row = {"Valeur": item}
+            has_value = False
+            for cell in row.values():
+                if cell is None or (isinstance(cell, str) and not cell.strip()):
+                    continue
+                try:
+                    if pd.isna(cell):
+                        continue
+                except Exception:
+                    pass
+                has_value = True
+                break
+            if has_value:
+                rows.append(row)
+        return rows
+    return [{"Valeur": value}]
+
+
+def _plain_export_value(value: Any) -> Any:
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, ensure_ascii=False, default=str)
+    return "" if value is None else value
+
+
 def password_hash(password: str) -> str:
     salt = uuid.uuid4().hex
     digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt.encode(), 240000).hex()
@@ -1677,7 +1753,27 @@ elif page == "Fiche de mesure":
         for item in my_measurements:
             rows.append({"Code":item.get("fiche_code",""),"Culture":item.get("culture",""),"Essai":item.get("essai",""),"Dossier":item.get("folder_name",""),"Station":item.get("station",""),"Année":item.get("annee",""),"Date de mesure":item.get("date_mesure",""),"Centre":item.get("centre","")})
         st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
-        st.download_button("📊 Exporter toutes mes fiches de mesures en Excel",excel_bytes({"Fiches":pd.DataFrame(rows)}),
+        measure_export_sheets = {}
+        for rec_no, rec in enumerate(my_measurements, 1):
+            grid_rows = _normalize_grid_rows(rec.get("grid"))
+            headers_saved = rec.get("headers") or []
+            if isinstance(headers_saved, str):
+                try: headers_saved = json.loads(headers_saved)
+                except Exception: headers_saved = []
+            columns_saved = list(dict.fromkeys([str(c) for c in headers_saved] +
+                                                [str(k) for row in grid_rows for k in row.keys()]))
+            general = [{"Champ":k, "Valeur":_plain_export_value(v)} for k,v in rec.items()
+                       if k not in {"grid","owner_email"}]
+            general.append({"Champ":"GRILLE DE MESURES", "Valeur":f"{len(grid_rows)} ligne(s)"})
+            sheet_rows = [{"Champ":"INFORMATIONS DE LA FICHE","Valeur":""}] + general
+            if columns_saved:
+                sheet_rows.append({"Champ":"N° ligne", **{c:c for c in columns_saved}})
+                for n, gr in enumerate(grid_rows,1):
+                    sheet_rows.append({"Champ":n, **{c:_plain(gr.get(c,"")) for c in columns_saved}})
+            safe_sheet = re.sub(r"[\\[\\]:*?/\\\\]", "_", f"Fiche_{rec_no}_{rec.get('fiche_code','')}")[:31]
+            measure_export_sheets[safe_sheet or f"Fiche_{rec_no}"] = pd.DataFrame(sheet_rows).fillna("")
+        st.download_button("📊 Exporter toutes mes fiches de mesures en Excel",
+            excel_bytes(measure_export_sheets or {"Fiches":pd.DataFrame(rows)}),
             "MES_FICHES_MESURES_ISRA_CRA.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     else:
         st.info("Aucune fiche de mesures finale enregistrée pour le moment.")
@@ -1694,7 +1790,14 @@ elif page == "Fiche de mesure":
             if isinstance(saved_grid, str):
                 try: saved_grid = json.loads(saved_grid)
                 except Exception: saved_grid = []
-            saved_grid_df = pd.DataFrame(saved_grid if isinstance(saved_grid, list) else [])
+            saved_grid_rows = _normalize_grid_rows(saved_grid)
+            saved_headers = saved_measure.get("headers") or []
+            if isinstance(saved_headers, str):
+                try: saved_headers = json.loads(saved_headers)
+                except Exception: saved_headers = []
+            saved_columns = list(dict.fromkeys([str(c) for c in saved_headers] +
+                                                [str(k) for row in saved_grid_rows for k in row.keys()]))
+            saved_grid_df = pd.DataFrame(saved_grid_rows, columns=saved_columns or None).fillna("")
             folder_rows = db_rows("cra_culture_folders", 3000)
             folder_map = {"Sans dossier": ""}
             for f in folder_rows:
@@ -1725,6 +1828,8 @@ elif page == "Fiche de mesure":
                            "annee":edit_year, "responsables":edit_responsables, "parametres":edit_params,
                            "date_mesure":edit_date, "observations":edit_observations,
                            "grid":edit_grid.fillna("").to_dict(orient="records"),
+                           "headers":[str(c) for c in edit_grid.columns],
+                           "ncols":len(edit_grid.columns),"nrows":len(edit_grid.index),
                            "folder_id":selected_folder_id_edit,
                            "folder_name":f"{selected_folder.get('culture','')} · {selected_folder.get('folder_name','')}" if selected_folder_id_edit else ""}
                 if db_update("cra_measurement_sheets", saved_measure.get("id"), changes):
@@ -1812,14 +1917,11 @@ elif page == "Dossiers de culture":
         tech_meta_rows=[]; tech_obs_rows=[]; measure_meta_rows=[]; measure_grid_rows=[]
         for r in folder_tech:
             tech_meta_rows.append({k:(json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list)) else v) for k,v in r.items() if k not in ("observations_periodiques",)})
-            for idx, obs in enumerate(r.get("observations_periodiques") or [], start=1):
+            for idx, obs in enumerate(_normalize_grid_rows(r.get("observations_periodiques")), start=1):
                 tech_obs_rows.append({"Code fiche":r.get("code"),"Culture":r.get("culture"),"N° observation":idx,**obs})
         for r in folder_measures:
             measure_meta_rows.append({k:(json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list)) else v) for k,v in r.items() if k not in ("grid",)})
-            grid = r.get("grid") or []
-            if isinstance(grid,str):
-                try: grid=json.loads(grid)
-                except Exception: grid=[]
+            grid = _normalize_grid_rows(r.get("grid"))
             for idx, obs in enumerate(grid, start=1):
                 if isinstance(obs,dict): measure_grid_rows.append({"Code fiche":r.get("fiche_code"),"Culture":r.get("culture"),"Essai":r.get("essai"),"N° ligne":idx,**obs})
         folder_excel = excel_bytes({
@@ -1918,10 +2020,7 @@ elif page == "Collaboration":
                             e_hypothese=st.text_area("Hypothèse scientifique",target.get("hypothese", ""),key=f"ch_{share.get('id')}")
                             e_apports=st.text_area("Apports et interventions",target.get("apports_interventions", ""),key=f"ca_{share.get('id')}")
                             e_observations=st.text_area("Observations qualitatives",target.get("observations", ""),key=f"cv_{share.get('id')}")
-                            old_obs=target.get("observations_periodiques") or []
-                            if isinstance(old_obs,str):
-                                try: old_obs=json.loads(old_obs)
-                                except Exception: old_obs=[]
+                            old_obs=_normalize_grid_rows(target.get("observations_periodiques"))
                             obs_editor=st.data_editor(pd.DataFrame(old_obs),key=f"cg_{share.get('id')}",num_rows="dynamic",use_container_width=True,hide_index=True)
                             e_signature=st.text_input("Signature / visa",target.get("signature_numerique", ""),key=f"cs_{share.get('id')}")
                             save_shared=st.form_submit_button("💾 Enregistrer et poursuivre le travail",type="primary",use_container_width=True)
@@ -1933,10 +2032,7 @@ elif page == "Collaboration":
                             e_params=st.text_input("Paramètres mesurés",target.get("parametres", ""),key=f"mp_{share.get('id')}")
                             e_other=st.text_area("Autre(s)",target.get("autres", ""),key=f"mo_{share.get('id')}")
                             e_obs=st.text_area("Observations",target.get("observations", ""),key=f"mv_{share.get('id')}")
-                            old_grid=target.get("grid") or []
-                            if isinstance(old_grid,str):
-                                try: old_grid=json.loads(old_grid)
-                                except Exception: old_grid=[]
+                            old_grid=_normalize_grid_rows(target.get("grid"))
                             grid_editor=st.data_editor(pd.DataFrame(old_grid),key=f"mg_{share.get('id')}",num_rows="dynamic",use_container_width=True,hide_index=True)
                             save_shared=st.form_submit_button("💾 Enregistrer et poursuivre le travail",type="primary",use_container_width=True)
                         if save_shared:
@@ -2397,91 +2493,42 @@ elif page == "Données et exports":
     </style>""", unsafe_allow_html=True)
 
     def _as_rows(value):
-        """Normalise une grille, y compris les formats JSON historiques et les grilles imbriquées."""
-        if value is None:
-            return []
-        if isinstance(value, str):
-            if not value.strip():
-                return []
-            try:
-                value = json.loads(value)
-            except Exception:
-                return []
-        if isinstance(value, pd.DataFrame):
-            value = value.to_dict(orient="records")
-        if isinstance(value, dict):
-            # Enregistrements anciens : grille dans payload / grid / rows / data / records.
-            for key in ("payload", "grid", "rows", "data", "records", "items", "values"):
-                nested = value.get(key)
-                if isinstance(nested, str):
-                    try:
-                        nested = json.loads(nested)
-                    except Exception:
-                        nested = None
-                if isinstance(nested, (list, tuple, dict, pd.DataFrame)):
-                    return _as_rows(nested)
-            candidates = [value]
-        elif isinstance(value, (list, tuple)):
-            candidates = []
-            for item in value:
-                if isinstance(item, str):
-                    try:
-                        parsed = json.loads(item)
-                        item = parsed if isinstance(parsed, (dict, list, tuple)) else item
-                    except Exception:
-                        pass
-                if isinstance(item, dict):
-                    candidates.append(item)
-                elif isinstance(item, (list, tuple)):
-                    candidates.append({f"Colonne {i+1}": v for i, v in enumerate(item)})
-                else:
-                    candidates.append({"Valeur": item})
-        else:
-            candidates = [{"Valeur": value}]
-
-        result = []
-        for row in candidates:
-            if not isinstance(row, dict):
-                continue
-            cleaned, has_content = {}, False
-            for key, cell in row.items():
-                if cell is None or (isinstance(cell, str) and not cell.strip()):
-                    cleaned[str(key)] = ""
-                    continue
-                try:
-                    if pd.isna(cell):
-                        cleaned[str(key)] = ""
-                        continue
-                except Exception:
-                    pass
-                cleaned[str(key)] = cell
-                has_content = True  # 0 et False sont des valeurs renseignées
-            if has_content:
-                result.append(cleaned)
-        return result
+        return _normalize_grid_rows(value)
 
     def _record_grid(record, field):
-        """Récupère la grille depuis le champ métier ou les enveloppes JSON historiques."""
-        value = record.get(field)
-        if value in (None, "") and isinstance(record.get("payload"), dict):
-            value = record["payload"].get(field)
-        if value in (None, "") and isinstance(record.get("payload"), str):
-            try:
-                value = json.loads(record["payload"]).get(field)
-            except Exception:
-                pass
-        return _as_rows(value)
+        """Récupère une grille depuis la fiche, payload JSON ou alias historique."""
+        aliases = {
+            "observations_periodiques": ("observations_periodiques", "observations_periodiques_json",
+                                         "technical_grid", "grid", "rows"),
+            "grid": ("grid", "measurement_grid", "grille", "mesures", "rows", "data"),
+        }
+        candidates = [field] + [x for x in aliases.get(field, ()) if x != field]
+        sources = [record]
+        payload = record.get("payload")
+        if isinstance(payload, str):
+            try: payload = json.loads(payload)
+            except Exception: payload = None
+        if isinstance(payload, dict):
+            sources.append(payload)
+        for source in sources:
+            for key in candidates:
+                value = source.get(key) if isinstance(source, dict) else None
+                if value is not None and value != "":
+                    rows = _as_rows(value)
+                    if rows:
+                        return rows
+                    headers = source.get("headers") or source.get("columns")
+                    if headers and isinstance(headers, (list, tuple)):
+                        return [{str(h): "" for h in headers}]
+        return []
 
     def _is_structured_grid(value):
-        """Vrai uniquement pour une grille structurée, jamais pour un texte libre."""
+        """Détecte les grilles natives et JSON, sans confondre un texte libre."""
         if isinstance(value, (list, tuple, pd.DataFrame, dict)):
             return True
         if isinstance(value, str) and value.strip().startswith(("[", "{")):
-            try:
-                parsed = json.loads(value)
-                return isinstance(parsed, (list, dict))
-            except Exception:
-                return False
+            try: return isinstance(json.loads(value), (list, dict))
+            except Exception: return False
         return False
 
     def _plain(value):
@@ -2532,7 +2579,8 @@ elif page == "Données et exports":
             # Bloc 1 : données générales de la fiche, sous forme champ / valeur.
             rows.append({"Champ": "INFORMATIONS DE LA FICHE", "Valeur": ""})
             for key, value in record.items():
-                if key == "owner_email" or (key in nested_grid_fields and _is_structured_grid(record.get(key))):
+                if key == "owner_email" or (key in nested_grid_fields and
+                    (_is_structured_grid(record.get(key)) or bool(_record_grid(record, key)))):
                     continue
                 rows.append({"Champ": str(key).replace("_", " ").capitalize(), "Valeur": _plain(value)})
 
@@ -2546,8 +2594,12 @@ elif page == "Données et exports":
                     rows.append({"Champ": "État de la grille", "Valeur": "Aucune ligne renseignée dans cette fiche."})
                     continue
                 columns = list(dict.fromkeys(str(col) for item in grid for col in item.keys()))
-                # Garde les colonnes même si toutes leurs cellules sont vides : elles font
-                # partie du modèle scientifique défini par l'utilisateur.
+                headers = record.get("headers") or []
+                if isinstance(headers, str):
+                    try: headers = json.loads(headers)
+                    except Exception: headers = []
+                if isinstance(headers, (list, tuple)):
+                    columns = list(dict.fromkeys([str(c) for c in headers] + columns))
                 if not columns:
                     columns = ["Observation"]
                 # En-tête et lignes de la grille dans la même feuille que les données.
@@ -2597,7 +2649,8 @@ elif page == "Données et exports":
             fields = [[Paragraph("Champ", head), Paragraph("Valeur", head)]]
             parsed_grids = {field: _record_grid(rec, field) for field in nested_grid_fields}
             for key, value in rec.items():
-                if key == "owner_email" or (key in nested_grid_fields and parsed_grids.get(key)):
+                if key == "owner_email" or (key in nested_grid_fields and
+                    (parsed_grids.get(key) or _is_structured_grid(value))):
                     continue
                 val = _plain(value)
                 val_text = escape(str(val)).replace("\n", "<br/>")
@@ -2621,16 +2674,27 @@ elif page == "Données et exports":
                 if not columns:
                     story.append(Paragraph("Aucune colonne définie.", small))
                     continue
-                matrix = [[Paragraph(escape(str(c)), head) for c in columns]]
-                for row in grid:
-                    matrix.append([Paragraph(escape(str(_plain(row.get(c, "")))), small) for c in columns])
-                widths = [doc.width / len(columns)] * len(columns)
-                gt = LongTable(matrix, colWidths=widths, repeatRows=1, splitByRow=1)
-                gt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#247A66")),
-                                        ("GRID",(0,0),(-1,-1),.35,colors.HexColor("#9CCDBD")),
-                                        ("VALIGN",(0,0),(-1,-1),"TOP"),
-                                        ("LEFTPADDING",(0,0),(-1,-1),3), ("RIGHTPADDING",(0,0),(-1,-1),3)]))
-                story.append(gt)
+                # Un PDF paysage ne peut pas rendre lisiblement 15 à 30 colonnes
+                # sur une seule largeur : toutes les colonnes sont donc imprimées
+                # par groupes successifs, avec le numéro de ligne conservé.
+                max_cols_per_table = 8
+                for offset in range(0, len(columns), max_cols_per_table):
+                    group = columns[offset:offset + max_cols_per_table]
+                    matrix = [[Paragraph(escape(str(c)), head) for c in group]]
+                    for row in grid:
+                        matrix.append([Paragraph(escape(str(_plain(row.get(c, "")))), small) for c in group])
+                    widths = [doc.width / max(1, len(group))] * len(group)
+                    gt = LongTable(matrix, colWidths=widths, repeatRows=1, splitByRow=1)
+                    gt.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#247A66")),
+                                            ("GRID",(0,0),(-1,-1),.35,colors.HexColor("#9CCDBD")),
+                                            ("VALIGN",(0,0),(-1,-1),"TOP"),
+                                            ("LEFTPADDING",(0,0),(-1,-1),3), ("RIGHTPADDING",(0,0),(-1,-1),3)]))
+                    story.append(gt)
+                    if offset + max_cols_per_table < len(columns):
+                        story.append(Paragraph(
+                            f"Suite des colonnes : {offset + max_cols_per_table + 1} à {min(offset + 2*max_cols_per_table, len(columns))}",
+                            small))
+
             story.append(Spacer(1, 6*mm))
 
         def decorate(canvas, document):
