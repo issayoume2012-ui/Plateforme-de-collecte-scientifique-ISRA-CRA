@@ -2963,8 +2963,35 @@ elif page == "Données et exports":
             xlsx_payload = excel_bytes(xlsx_sheets)
             pdf_payload = _records_pdf_bytes(label + " — sélection", selected_records, nested_grid_fields)
         else:
-            xlsx_payload = pdf_payload = None
-            st.caption("Aucune fiche enregistrée dans cette rubrique : les exports seront disponibles dès le premier enregistrement.")
+            # Relecture immédiate de la table : certaines sessions Streamlit gardent
+            # une ancienne liste en mémoire après l'enregistrement d'une fiche.
+            try:
+                fresh_records = db_rows(table, 5000)
+            except Exception:
+                fresh_records = []
+            if fresh_records:
+                visible = fresh_records
+                selected_records = list(fresh_records)
+                xlsx_sheets, _ = _export_parts(selected_records, label, nested_grid_fields)
+                xlsx_payload = excel_bytes(xlsx_sheets)
+                pdf_payload = _records_pdf_bytes(label + " — toutes les fiches", selected_records, nested_grid_fields)
+            else:
+                xlsx_payload = pdf_payload = None
+                st.caption("Aucune fiche enregistrée dans cette rubrique : les exports seront disponibles dès le premier enregistrement.")
+
+        # Dernier contrôle : ne jamais transmettre un buffer vide à Streamlit.
+        # Si des fiches existent, on reconstruit les deux fichiers directement
+        # depuis les enregistrements bruts, sans dépendre du filtre de sélection.
+        if selected_records:
+            if not xlsx_payload:
+                fallback_sheets, _ = _export_parts(selected_records, label, nested_grid_fields)
+                xlsx_payload = excel_bytes(fallback_sheets)
+            if not pdf_payload:
+                pdf_payload = _records_pdf_bytes(label + " — export complet", selected_records, nested_grid_fields)
+            if not xlsx_payload or not bytes(xlsx_payload).startswith(b"PK"):
+                raise RuntimeError(f"Échec de génération Excel pour {label} : fichier XLSX invalide.")
+            if not pdf_payload or not bytes(pdf_payload).startswith(b"%PDF"):
+                raise RuntimeError(f"Échec de génération PDF pour {label} : fichier PDF invalide.")
 
         st.markdown("#### Modifier / classer une fiche")
         editable_records = [r for r in visible if r.get("owner_email") == st.session_state.get("cra_user_email") or r.get("created_by") == st.session_state.get("cra_user_email")]
@@ -3041,9 +3068,20 @@ elif page == "Données et exports":
         st.markdown("#### Télécharger la sélection")
         c1,c2 = st.columns(2)
         with c1:
-            download_button("📊 Excel — sélection + grilles", xlsx_payload or b"", f"{prefix}_SELECTION.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"{key}_xlsx", use_container_width=True, disabled=not selected_records)
+            if selected_records and xlsx_payload:
+                st.download_button("📊 Excel — sélection + grilles", data=bytes(xlsx_payload),
+                    file_name=f"{prefix}_SELECTION.xlsx",
+                    mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    key=f"{key}_xlsx_direct", use_container_width=True)
+            else:
+                st.button("📊 Excel — aucune fiche disponible", key=f"{key}_xlsx_empty", disabled=True, use_container_width=True)
         with c2:
-            download_button("📄 PDF — sélection + grilles", pdf_payload or b"", f"{prefix}_SELECTION.pdf", "application/pdf", key=f"{key}_pdf", use_container_width=True, disabled=not selected_records)
+            if selected_records and pdf_payload:
+                st.download_button("📄 PDF — sélection + grilles", data=bytes(pdf_payload),
+                    file_name=f"{prefix}_SELECTION.pdf", mime="application/pdf",
+                    key=f"{key}_pdf_direct", use_container_width=True)
+            else:
+                st.button("📄 PDF — aucune fiche disponible", key=f"{key}_pdf_empty", disabled=True, use_container_width=True)
 
     st.markdown("### 📦 Export intégral (facultatif)")
     all_measure_grid_rows=[]
