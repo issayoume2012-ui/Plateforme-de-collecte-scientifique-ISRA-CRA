@@ -527,6 +527,134 @@ def as_csv(data: list[dict]) -> bytes:
     return pd.DataFrame(data).to_csv(index=False).encode("utf-8-sig")
 
 
+def download_button(label, data, file_name=None, mime=None, **kwargs):
+    """Téléchargement robuste : Streamlit reçoit toujours des octets prêts à servir."""
+    try:
+        if isinstance(data, BytesIO):
+            payload = data.getvalue()
+        elif isinstance(data, memoryview):
+            payload = data.tobytes()
+        elif isinstance(data, bytearray):
+            payload = bytes(data)
+        elif isinstance(data, bytes):
+            payload = data
+        elif isinstance(data, pd.DataFrame):
+            payload = data.to_csv(index=False).encode("utf-8-sig")
+            mime = mime or "text/csv"
+        elif isinstance(data, str):
+            payload = data.encode("utf-8")
+        else:
+            payload = bytes(data)
+        if not payload:
+            st.warning("Le fichier est vide : vérifiez les données avant le téléchargement.")
+            return
+        st.download_button(label=label, data=payload, file_name=file_name,
+                           mime=mime or "application/octet-stream", **kwargs)
+    except Exception as exc:
+        st.error(f"Téléchargement impossible pour « {file_name or label} » : {exc}")
+
+
+def two_sheet_fiche_excel(title, metadata, grid_frame, grid_title="Grille"):
+    """Classeur standard à exactement deux feuilles : Présentation et Grilles."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Border, Side, Alignment
+    from openpyxl.utils import get_column_letter
+    from openpyxl.worksheet.page import PageMargins
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Présentation"
+    wg = wb.create_sheet("Grilles")
+    dark, green, mint, pale, white = "16483F", "247A66", "BFE9DE", "EFF9F5", "FFFFFF"
+    thin = Side(style="thin", color="9CCDBD")
+
+    def banner(sheet, title_text, ncols):
+        ncols = max(2, ncols)
+        last = get_column_letter(ncols)
+        for row, text, fill, size in [
+            (1, "INSTITUT SÉNÉGALAIS DE RECHERCHES AGRICOLES — ISRA", dark, 12),
+            (2, "CENTRE DE RECHERCHES AGRICOLES — SAINT-LOUIS", green, 11),
+            (3, title_text, mint, 14),
+            (4, f"Document scientifique · {datetime.now().strftime('%d/%m/%Y %H:%M')} · {CONTACT_EMAIL}", pale, 9),
+        ]:
+            sheet.merge_cells(start_row=row, start_column=1, end_row=row, end_column=ncols)
+            c = sheet.cell(row, 1, text)
+            c.fill = PatternFill("solid", fgColor=fill)
+            c.font = Font(name="Aptos", size=size, bold=(row != 4), italic=(row == 4),
+                          color=white if row in (1, 2) else dark)
+            c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+            sheet.row_dimensions[row].height = 27 if row != 4 else 22
+        sheet.sheet_view.showGridLines = False
+
+    banner(ws, f"PRÉSENTATION — {title}", 4)
+    ws.append([])
+    ws.append(["Rubrique", "Valeur", "Rubrique", "Valeur"])
+    for c in ws[6]:
+        c.fill = PatternFill("solid", fgColor=green)
+        c.font = Font(bold=True, color=white)
+        c.alignment = Alignment(horizontal="center", wrap_text=True)
+        c.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    items = [(str(k).replace("_", " ").capitalize(),
+              json.dumps(v, ensure_ascii=False, default=str) if isinstance(v, (dict, list, tuple)) else ("" if v is None else str(v)))
+             for k, v in metadata.items() if k not in {"grid", "observations_periodiques", "headers", "observations_headers", "types", "owner_email"}]
+    for i in range(0, len(items), 2):
+        left = items[i]
+        right = items[i+1] if i+1 < len(items) else ("", "")
+        ws.append([left[0], left[1], right[0], right[1]])
+        r = ws.max_row
+        for c in ws[r]:
+            c.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+            c.alignment = Alignment(vertical="top", wrap_text=True)
+            c.font = Font(name="Aptos", size=9, color=dark)
+            if c.column in (1, 3):
+                c.fill = PatternFill("solid", fgColor=mint)
+                c.font = Font(name="Aptos", size=9, bold=True, color=dark)
+            else:
+                c.fill = PatternFill("solid", fgColor=pale)
+        ws.row_dimensions[r].height = 30
+    for col, width in {1:25, 2:48, 3:25, 4:48}.items():
+        ws.column_dimensions[get_column_letter(col)].width = width
+    ws.freeze_panes = "A7"
+    banner(wg, f"{grid_title.upper()} — {title}", max(2, len(grid_frame.columns)))
+    frame = grid_frame.copy() if isinstance(grid_frame, pd.DataFrame) else pd.DataFrame(grid_frame)
+    if len(frame.columns) == 0:
+        frame = pd.DataFrame(columns=["Observation"])
+    # Conserver strictement l'ordre et les noms des colonnes définies par l'utilisateur.
+    for j, name in enumerate(frame.columns, 1):
+        c = wg.cell(6, j, str(name))
+        c.fill = PatternFill("solid", fgColor=green)
+        c.font = Font(bold=True, color=white)
+        c.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
+        c.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+    if frame.empty:
+        wg.cell(7, 1, "Aucune ligne de données saisie")
+    else:
+        for ri, vals in enumerate(frame.fillna("").itertuples(index=False, name=None), 7):
+            for ci, val in enumerate(vals, 1):
+                c = wg.cell(ri, ci, val.item() if hasattr(val, "item") else val)
+                c.font = Font(name="Aptos", size=9, color=dark)
+                c.alignment = Alignment(vertical="top", wrap_text=True)
+                c.border = Border(left=thin, right=thin, top=thin, bottom=thin)
+                if ri % 2 == 1:
+                    c.fill = PatternFill("solid", fgColor=pale)
+    for ci, name in enumerate(frame.columns, 1):
+        vals = [str(name)] + [str(x) for x in frame.iloc[:, ci-1].head(100).tolist()]
+        wg.column_dimensions[get_column_letter(ci)].width = min(34, max(14, max(map(len, vals), default=14) + 2))
+    wg.freeze_panes = "A7"
+    for sheet in (ws, wg):
+        sheet.sheet_properties.pageSetUpPr.fitToPage = True
+        sheet.page_setup.orientation = "landscape"
+        sheet.page_setup.paperSize = sheet.PAPERSIZE_A4
+        sheet.page_setup.fitToWidth = 1
+        sheet.page_setup.fitToHeight = 0
+        sheet.page_margins = PageMargins(left=.25, right=.25, top=.45, bottom=.45, header=.2, footer=.2)
+        sheet.oddFooter.center.text = "ISRA · CRA SAINT-LOUIS | YAM GROUP — YAM NUMÉRIQUE"
+        sheet.print_title_rows = "1:6"
+    output = BytesIO()
+    wb.save(output)
+    return output.getvalue()
+
+
 def excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
     """Exporte Excel institutionnel : en-tête ISRA/CRA, métadonnées et tableau structuré.
 
@@ -1202,14 +1330,30 @@ elif page == "Fiche technique":
         apports = st.text_area("Apports et interventions (engrais, doses, traitements, dates)", height=100)
 
         st.markdown("#### 4. Grille dynamique des observations expérimentales")
-        g1,g2 = st.columns(2)
+        g1,g2,g3 = st.columns(3)
         with g1:
-            obs_nrows = st.number_input("Nombre de lignes d'observation", min_value=1, max_value=300, value=20, key="tech_obs_nrows")
+            obs_ncols = st.number_input("Nombre de colonnes", min_value=1, max_value=25, value=9, key="tech_obs_ncols")
         with g2:
-            obs_columns_text = st.text_input("Colonnes (séparées par des virgules)", "Date, Bloc, Modalité, Parcelle, Stade, Hauteur (cm), Note sanitaire, Croissance, Observateur")
-        obs_cols = [x.strip() for x in obs_columns_text.split(",") if x.strip()] or ["Date", "Observation"]
-        obs_frame = pd.DataFrame([{col: "" for col in obs_cols} for _ in range(int(obs_nrows))])
-        obs_grid = st.data_editor(obs_frame, key="technical_observations_grid", num_rows="fixed", use_container_width=True, hide_index=True, height=min(600, 38*(int(obs_nrows)+1)))
+            obs_nrows = st.number_input("Nombre de lignes d'observation", min_value=1, max_value=300, value=20, key="tech_obs_nrows")
+        with g3:
+            st.caption("Définissez chaque intitulé, puis saisissez directement les observations dans la grille.")
+        default_obs_headers = ["Date", "Bloc", "Modalité", "Parcelle", "Stade", "Hauteur (cm)", "Note sanitaire", "Croissance", "Observateur"]
+        obs_cols = []
+        obs_header_cols = st.columns(min(int(obs_ncols), 5))
+        for oi in range(int(obs_ncols)):
+            with obs_header_cols[oi % len(obs_header_cols)]:
+                default_name = default_obs_headers[oi] if oi < len(default_obs_headers) else f"Colonne {oi+1}"
+                obs_cols.append(st.text_input(f"Nom de la colonne {oi+1}", value=default_name, key=f"tech_obs_header_{oi}").strip() or f"Colonne {oi+1}")
+        # Évite les intitulés identiques qui écraseraient des valeurs à l'export.
+        unique_cols=[]
+        for oi, name in enumerate(obs_cols, 1):
+            candidate=name; suffix=2
+            while candidate in unique_cols:
+                candidate=f"{name} ({suffix})"; suffix+=1
+            unique_cols.append(candidate)
+        obs_cols=unique_cols
+        obs_frame = pd.DataFrame([{col: "" for col in obs_cols} for _ in range(int(obs_nrows))], columns=obs_cols)
+        obs_grid = st.data_editor(obs_frame, key="technical_observations_grid", num_rows="dynamic", use_container_width=True, hide_index=True, height=min(600, 38*(int(obs_nrows)+1)))
 
         st.markdown("#### 5. Observations qualitatives et validation")
         observations = st.text_area("Remarques, résultats qualitatifs et recommandations", height=110)
@@ -1226,6 +1370,7 @@ elif page == "Fiche technique":
         "traitements_modalites": traitements_modalites,
         "calendrier": {k: v.isoformat() if v else "" for k,v in calendar_values.items()},
         "apports_interventions": apports, "observations_periodiques": obs_grid.fillna("").to_dict(orient="records"),
+        "observations_headers": [str(c) for c in obs_grid.columns], "observations_ncols": len(obs_grid.columns),
         "observations": observations, "signature_numerique": signature, "lien_reference": lien_reference.strip(),
         "folder_id": dossier_id, "folder_name": dossier_nom,
     }
@@ -1290,7 +1435,7 @@ elif page == "Fiche technique":
         ws.page_margins=PageMargins(left=.25,right=.25,top=.45,bottom=.45,header=.2,footer=.2); ws.print_area=f"A1:{get_column_letter(width)}{row-1}"
         ws.oddHeader.center.text="&BISRA / CRA SAINT-LOUIS — FICHE TECHNIQUE"; ws.oddFooter.center.text="ISRA · CRA SAINT-LOUIS | YAM GROUP — YAM NUMÉRIQUE"
         wb.save(output); return output.getvalue()
-    tech_excel = technical_excel_one_sheet(tech_payload, tech_frame)
+    tech_excel = two_sheet_fiche_excel("Fiche technique d’essai agronomique", tech_meta, tech_frame, "Grille des observations")
     tech_csv = tech_frame.to_csv(index=False).encode("utf-8-sig")
     def technical_sheet_pdf(meta, observations_frame):
         from reportlab.lib import colors
@@ -1319,16 +1464,20 @@ elif page == "Fiche technique":
             ("VALIGN",(0,0),(-1,-1),"TOP"),("FONTSIZE",(0,0),(-1,-1),7),("LEFTPADDING",(0,0),(-1,-1),5),("RIGHTPADDING",(0,0),(-1,-1),5)]))
         story += [Paragraph("1. IDENTIFICATION, CONTEXTE ET CALENDRIER", styles["Heading3"]), mt, Spacer(1,4*mm),
                   Paragraph("2. GRILLE DES OBSERVATIONS EXPÉRIMENTALES", styles["Heading3"])]
-        headers = list(observations_frame.columns)
-        table_data = [[Paragraph("<b>"+escape(str(h))+"</b>", cell_style) for h in headers]]
-        for vals in observations_frame.fillna("").astype(str).itertuples(index=False, name=None):
-            table_data.append([Paragraph(escape(str(v)), cell_style) for v in vals])
-        if len(table_data) == 1:
-            table_data.append([Paragraph("Aucune observation saisie", cell_style)] + [""] * max(0,len(headers)-1))
-        obs_table = Table(table_data, colWidths=[doc.width/max(1,len(headers))]*len(headers), repeatRows=1)
-        obs_table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#BFE9DE")),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#8BB9AA")),
-            ("VALIGN",(0,0),(-1,-1),"TOP"),("FONTSIZE",(0,0),(-1,-1),6)]))
-        story += [obs_table, Spacer(1,5*mm), Paragraph("3. OBSERVATIONS QUALITATIVES", styles["Heading3"]),
+        headers = list(observations_frame.columns) or list(meta.get("observations_headers", [])) or ["Observation"]
+        observations_frame = observations_frame.reindex(columns=headers, fill_value="")
+        for offset in range(0, len(headers), 8):
+            group = headers[offset:offset+8]
+            table_data = [[Paragraph("<b>"+escape(str(h))+"</b>", cell_style) for h in group]]
+            for vals in observations_frame.fillna("").astype(str).itertuples(index=False, name=None):
+                table_data.append([Paragraph(escape(str(v)), cell_style) for v in vals[offset:offset+8]])
+            if len(table_data) == 1:
+                table_data.append([Paragraph("Aucune observation saisie", cell_style)] + [""] * max(0,len(group)-1))
+            obs_table = Table(table_data, colWidths=[doc.width/max(1,len(group))]*len(group), repeatRows=1)
+            obs_table.setStyle(TableStyle([("BACKGROUND",(0,0),(-1,0),colors.HexColor("#BFE9DE")),("GRID",(0,0),(-1,-1),.35,colors.HexColor("#8BB9AA")),
+                ("VALIGN",(0,0),(-1,-1),"TOP"),("FONTSIZE",(0,0),(-1,-1),6)]))
+            story.append(obs_table)
+        story += [Spacer(1,5*mm), Paragraph("3. OBSERVATIONS QUALITATIVES", styles["Heading3"]),
                   Paragraph(escape(str(meta.get("observations", ""))).replace("\n", "<br/>") or "—", cell_style), Spacer(1,8*mm),
                   Paragraph("Signature / visa du responsable : " + escape(str(meta.get("signature_numerique", ""))), cell_style)]
         def tech_page_brand(canvas, document):
@@ -1348,9 +1497,9 @@ elif page == "Fiche technique":
 
     tech_pdf = technical_sheet_pdf(tech_meta, tech_frame)
     ex1,ex2,ex3 = st.columns(3)
-    ex1.download_button("📊 Excel de la fiche technique", tech_excel, f"FICHE_TECHNIQUE_{slugify(tech_payload['code'])}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-    ex2.download_button("📄 PDF officiel", tech_pdf, f"FICHE_TECHNIQUE_{slugify(tech_payload['code'])}.pdf", "application/pdf", use_container_width=True)
-    ex3.download_button("📑 CSV observations", tech_csv, f"OBSERVATIONS_{slugify(tech_payload['code'])}.csv", "text/csv", use_container_width=True)
+    download_button("📊 Excel de la fiche technique", tech_excel, f"FICHE_TECHNIQUE_{slugify(tech_payload['code'])}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+    download_button("📄 PDF officiel", tech_pdf, f"FICHE_TECHNIQUE_{slugify(tech_payload['code'])}.pdf", "application/pdf", use_container_width=True)
+    download_button("📑 CSV observations", tech_csv, f"OBSERVATIONS_{slugify(tech_payload['code'])}.csv", "text/csv", use_container_width=True)
     if submitted:
         tech_payload["created_at"] = datetime.now().isoformat(timespec="seconds")
         if db_insert("cra_technical_sheets", tech_payload):
@@ -1469,8 +1618,14 @@ elif page == "Fiche de mesure":
     for i in range(int(ncols)):
         default_header = previous_headers[i] if i < len(previous_headers) and previous_headers[i] else ("N°" if i==0 else f"Paramètre {i}")
         with type_cols[i % len(type_cols)]:
-            headers.append(st.text_input(f"En-tête {i+1}", value=default_header, key=f"m_header_{i}"))
-            type_map[headers[-1] or f"Colonne {i+1}"] = st.selectbox(f"Type {i+1}", type_options,
+            raw_header = st.text_input(f"En-tête {i+1}", value=default_header, key=f"m_header_{i}").strip() or f"Colonne {i+1}"
+            final_header = raw_header
+            suffix = 2
+            while final_header in headers:
+                final_header = f"{raw_header} ({suffix})"
+                suffix += 1
+            headers.append(final_header)
+            type_map[final_header] = st.selectbox(f"Type {i+1}", type_options,
                 index=type_options.index(previous_types.get(default_header,"Numérique")) if previous_types.get(default_header,"Numérique") in type_options else 0,
                 key=f"m_type_{i}")
 
@@ -1659,8 +1814,8 @@ elif page == "Fiche de mesure":
             wb.save(output)
             return output.getvalue()
 
-        st.download_button("⬇️ Excel (.xlsx) — fiche complète sur une seule feuille",
-            measurement_excel_one_sheet(metadata, edited_grid),
+        download_button("⬇️ Excel (.xlsx) — présentation + grilles",
+            two_sheet_fiche_excel("Fiche de mesures", metadata, edited_grid, "Grille de mesures"),
             f"FICHE_MESURES_{slugify(essai or 'ISRA_CRA')}.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
@@ -1668,7 +1823,7 @@ elif page == "Fiche de mesure":
     csv_header = "# FICHE DE MESURES — ISRA / Saint-Louis\n" + "\n".join(
         f"# {k}: {v}" for k, v in metadata.items() if k not in ("grid", "headers", "types")) + "\n\n"
     csv_data=(csv_header + csv_frame.to_csv(index=False)).encode("utf-8-sig")
-    st.download_button("⬇️ Télécharger la grille CSV", csv_data,
+    download_button("⬇️ Télécharger la grille CSV", csv_data,
         f"FICHE_MESURES_{slugify(essai or 'ISRA_CRA')}.csv", "text/csv", use_container_width=True)
 
     def measurement_pdf(meta, frame, blank=False):
@@ -1676,7 +1831,7 @@ elif page == "Fiche de mesure":
         from reportlab.lib.pagesizes import A4, landscape
         from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
         from reportlab.lib.enums import TA_CENTER
-        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+        from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, LongTable, TableStyle, PageBreak
         from reportlab.lib.units import mm
         from xml.sax.saxutils import escape
         out=BytesIO()
@@ -1698,16 +1853,23 @@ elif page == "Fiche de mesure":
         ft=Table(field_rows,colWidths=[doc.width/2,doc.width/2],rowHeights=13*mm)
         ft.setStyle(TableStyle([("GRID",(0,0),(-1,-1),.5,colors.HexColor("#6B9B8D")),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("BACKGROUND",(0,0),(-1,-1),colors.HexColor("#EFF9F5")),("LEFTPADDING",(0,0),(-1,-1),5)]))
         story += [ft,Spacer(1,4*mm),Paragraph("GRILLE DE MESURES",styles["Heading3"])]
-        cols=list(frame.columns)
-        data=[[Paragraph(f"<b>{escape(str(c))}</b>",small) for c in cols]]
-        if blank:
-            for _ in range(int(meta.get("nrows",20))): data.append([""]*len(cols))
-        else:
-            for row in frame.fillna("").astype(str).itertuples(index=False,name=None): data.append([Paragraph(escape(str(v)),small) for v in row])
-        widths=[doc.width/max(1,len(cols))]*len(cols)
-        gt=Table(data,colWidths=widths,repeatRows=1,rowHeights=8*mm if blank else None)
-        gt.setStyle(TableStyle([("GRID",(0,0),(-1,-1),.45,colors.HexColor("#6B9B8D")),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#BFE9DE")),("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#16483F")),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3)]))
-        story += [gt,Spacer(1,4*mm),Paragraph("OBSERVATIONS",styles["Heading3"]),Paragraph(escape("" if blank else str(meta.get("observations",""))).replace("\n","<br/>") or "<br/><br/><br/>",small)]
+        cols=list(frame.columns) or list(meta.get("headers", [])) or ["Observation"]
+        frame = frame.reindex(columns=cols, fill_value="")
+        max_cols=8
+        for offset in range(0, len(cols), max_cols):
+            group=cols[offset:offset+max_cols]
+            data=[[Paragraph(f"<b>{escape(str(c))}</b>",small) for c in group]]
+            if blank:
+                for _ in range(int(meta.get("nrows",20))): data.append([""]*len(group))
+            else:
+                for row in frame.fillna("").astype(str).itertuples(index=False,name=None):
+                    data.append([Paragraph(escape(str(v)),small) for v in row[offset:offset+max_cols]])
+            widths=[doc.width/max(1,len(group))]*len(group)
+            gt=LongTable(data,colWidths=widths,repeatRows=1,splitByRow=1)
+            gt.setStyle(TableStyle([("GRID",(0,0),(-1,-1),.45,colors.HexColor("#6B9B8D")),("BACKGROUND",(0,0),(-1,0),colors.HexColor("#BFE9DE")),("TEXTCOLOR",(0,0),(-1,0),colors.HexColor("#16483F")),("VALIGN",(0,0),(-1,-1),"MIDDLE"),("LEFTPADDING",(0,0),(-1,-1),3),("RIGHTPADDING",(0,0),(-1,-1),3)]))
+            story.append(gt)
+            if offset + max_cols < len(cols): story.append(Paragraph(f"Suite de la grille — colonnes {offset+max_cols+1} à {min(offset+2*max_cols,len(cols))}",small))
+        story += [Spacer(1,4*mm),Paragraph("OBSERVATIONS",styles["Heading3"]),Paragraph(escape("" if blank else str(meta.get("observations",""))).replace("\n","<br/>") or "<br/><br/><br/>",small)]
         def measure_page_brand(canvas, document):
             canvas.saveState(); w, h = landscape(A4)
             canvas.setFillColor(colors.HexColor("#BFE9DE")); canvas.rect(0, h-12*mm, w, 12*mm, fill=1, stroke=0)
@@ -1737,10 +1899,10 @@ elif page == "Fiche de mesure":
             st.success("Fiche de mesures enregistrée dans votre espace personnel ISRA / CRA Saint-Louis.")
     if blank_pdf:
         blank_meta=dict(metadata); blank_meta["observations"]=""
-        st.download_button("📥 Télécharger le modèle PDF vierge",measurement_pdf(blank_meta,edited_grid.iloc[0:0],True),
+        download_button("📥 Télécharger le modèle PDF vierge",measurement_pdf(blank_meta,edited_grid.iloc[0:0],True),
             "ISRA_CRA_FICHE_MESURES_VIERGE.pdf","application/pdf")
     if filled_pdf:
-        st.download_button("📥 Télécharger la fiche PDF remplie",measurement_pdf(metadata,edited_grid,False),
+        download_button("📥 Télécharger la fiche PDF remplie",measurement_pdf(metadata,edited_grid,False),
             f"ISRA_CRA_FICHE_MESURES_{slugify(essai or 'essai')}.pdf","application/pdf")
 
     st.markdown("#### Impression directe")
@@ -1753,7 +1915,8 @@ elif page == "Fiche de mesure":
         for item in my_measurements:
             rows.append({"Code":item.get("fiche_code",""),"Culture":item.get("culture",""),"Essai":item.get("essai",""),"Dossier":item.get("folder_name",""),"Station":item.get("station",""),"Année":item.get("annee",""),"Date de mesure":item.get("date_mesure",""),"Centre":item.get("centre","")})
         st.dataframe(pd.DataFrame(rows),use_container_width=True,hide_index=True)
-        measure_export_sheets = {}
+        measure_presentation_rows = []
+        measure_grid_rows = []
         for rec_no, rec in enumerate(my_measurements, 1):
             grid_rows = _normalize_grid_rows(rec.get("grid"))
             headers_saved = rec.get("headers") or []
@@ -1762,19 +1925,36 @@ elif page == "Fiche de mesure":
                 except Exception: headers_saved = []
             columns_saved = list(dict.fromkeys([str(c) for c in headers_saved] +
                                                 [str(k) for row in grid_rows for k in row.keys()]))
-            general = [{"Champ":k, "Valeur":_plain_export_value(v)} for k,v in rec.items()
-                       if k not in {"grid","owner_email"}]
-            general.append({"Champ":"GRILLE DE MESURES", "Valeur":f"{len(grid_rows)} ligne(s)"})
-            sheet_rows = [{"Champ":"INFORMATIONS DE LA FICHE","Valeur":""}] + general
-            if columns_saved:
-                sheet_rows.append({"Champ":"N° ligne", **{c:c for c in columns_saved}})
-                for n, gr in enumerate(grid_rows,1):
-                    sheet_rows.append({"Champ":n, **{c:_plain(gr.get(c,"")) for c in columns_saved}})
-            safe_sheet = re.sub(r"[\\[\\]:*?/\\\\]", "_", f"Fiche_{rec_no}_{rec.get('fiche_code','')}")[:31]
-            measure_export_sheets[safe_sheet or f"Fiche_{rec_no}"] = pd.DataFrame(sheet_rows).fillna("")
-        st.download_button("📊 Exporter toutes mes fiches de mesures en Excel",
-            excel_bytes(measure_export_sheets or {"Fiches":pd.DataFrame(rows)}),
-            "MES_FICHES_MESURES_ISRA_CRA.xlsx","application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            code = rec.get("fiche_code") or f"Fiche_{rec_no}"
+            measure_presentation_rows.append({"N° fiche":rec_no, "Code fiche":code,
+                **{str(k).replace("_", " ").capitalize():_plain_export_value(v)
+                   for k,v in rec.items() if k not in {"grid","owner_email","id"}
+                   and not isinstance(v,(dict,list,tuple))}})
+            if not columns_saved: columns_saved = ["Observation"]
+            for n, gr in enumerate(grid_rows,1):
+                measure_grid_rows.append({"N° fiche":rec_no,"Code fiche":code,"N° ligne":n,
+                                          **{c:_plain(gr.get(c,"")) for c in columns_saved}})
+            if not grid_rows:
+                measure_grid_rows.append({"N° fiche":rec_no,"Code fiche":code,"N° ligne":"",
+                                          **{c:"" for c in columns_saved}})
+        saved_measure_excel = two_sheet_fiche_excel(
+            "Toutes les fiches de mesures enregistrées",
+            {"Nombre de fiches":len(my_measurements), "Centre":"ISRA / CRA Saint-Louis",
+             "Date d’export":datetime.now().strftime("%d/%m/%Y %H:%M")},
+            pd.DataFrame(measure_grid_rows), "Grilles de mesures")
+        # Remplace la feuille de présentation générique par une vue récapitulative de chaque fiche.
+        from openpyxl import load_workbook
+        _wb = load_workbook(BytesIO(saved_measure_excel))
+        _ws = _wb["Présentation"]
+        _ws.delete_rows(6, _ws.max_row)
+        _ws.cell(6,1,"N° fiche"); _ws.cell(6,2,"Code fiche"); _ws.cell(6,3,"Culture"); _ws.cell(6,4,"Essai")
+        for _i, _row in enumerate(measure_presentation_rows,7):
+            _ws.cell(_i,1,_row.get("N° fiche")); _ws.cell(_i,2,_row.get("Code fiche"))
+            _ws.cell(_i,3,_row.get("Culture","")); _ws.cell(_i,4,_row.get("Essai",""))
+        _buffer=BytesIO(); _wb.save(_buffer); saved_measure_excel=_buffer.getvalue()
+        download_button("📊 Exporter toutes mes fiches de mesures en Excel",
+            saved_measure_excel, "MES_FICHES_MESURES_ISRA_CRA.xlsx",
+            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
     else:
         st.info("Aucune fiche de mesures finale enregistrée pour le moment.")
 
@@ -1933,12 +2113,12 @@ elif page == "Dossiers de culture":
         })
         st.markdown("#### Téléchargements du dossier")
         d1,d2,d3 = st.columns(3)
-        d1.download_button("📊 TOUT télécharger en Excel", folder_excel,
+        download_button("📊 TOUT télécharger en Excel", folder_excel,
             f"DOSSIER_{slugify(folder.get('folder_name','culture'))}_ISRA.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
         combined_rows = ([{"Type":"Fiche technique", "Code":r.get("code"), "Culture":r.get("culture"), "Date":r.get("date_collecte"), "Résumé":r.get("objectif","")} for r in folder_tech] +
                          [{"Type":"Fiche de mesures", "Code":r.get("fiche_code"), "Culture":r.get("culture"), "Date":r.get("date_mesure"), "Résumé":r.get("parametres","")} for r in folder_measures])
-        d2.download_button("📄 Rapport PDF du dossier", pdf_bytes("DOSSIER DE CULTURE — " + str(folder.get("folder_name","")), pd.DataFrame(combined_rows or [{"Information":"Aucune fiche déposée"}])),
+        download_button("📄 Rapport PDF du dossier", pdf_bytes("DOSSIER DE CULTURE — " + str(folder.get("folder_name","")), pd.DataFrame(combined_rows or [{"Information":"Aucune fiche déposée"}])),
             f"RAPPORT_{slugify(folder.get('folder_name','culture'))}.pdf", "application/pdf", use_container_width=True)
         # Archive CSV : métadonnées et matrices au format exploitable par R/Python.
         csv_zip_io = BytesIO()
@@ -1947,7 +2127,7 @@ elif page == "Dossiers de culture":
             zf.writestr("observations_techniques.csv", pd.DataFrame(tech_obs_rows).to_csv(index=False).encode("utf-8-sig"))
             zf.writestr("fiches_mesures.csv", pd.DataFrame(measure_meta_rows).to_csv(index=False).encode("utf-8-sig"))
             zf.writestr("grilles_mesures.csv", pd.DataFrame(measure_grid_rows).to_csv(index=False).encode("utf-8-sig"))
-        d3.download_button("📦 CSV complets (ZIP)", csv_zip_io.getvalue(),
+        download_button("📦 CSV complets (ZIP)", csv_zip_io.getvalue(),
             f"CSV_{slugify(folder.get('folder_name','culture'))}.zip", "application/zip", use_container_width=True)
 
 # ---------------------------------------------------------------------
@@ -2025,7 +2205,7 @@ elif page == "Collaboration":
                             e_signature=st.text_input("Signature / visa",target.get("signature_numerique", ""),key=f"cs_{share.get('id')}")
                             save_shared=st.form_submit_button("💾 Enregistrer et poursuivre le travail",type="primary",use_container_width=True)
                         if save_shared:
-                            changes={"objectif":e_objectif,"hypothese":e_hypothese,"apports_interventions":e_apports,"observations":e_observations,"observations_periodiques":obs_editor.fillna("").to_dict(orient="records"),"signature_numerique":e_signature,"last_collaborative_edit_by":st.session_state.get("cra_user_email"),"last_collaborative_edit_at":datetime.now().isoformat(timespec="seconds")}
+                            changes={"objectif":e_objectif,"hypothese":e_hypothese,"apports_interventions":e_apports,"observations":e_observations,"observations_periodiques":obs_editor.fillna("").to_dict(orient="records"),"observations_headers":[str(c) for c in obs_editor.columns],"observations_ncols":len(obs_editor.columns),"signature_numerique":e_signature,"last_collaborative_edit_by":st.session_state.get("cra_user_email"),"last_collaborative_edit_at":datetime.now().isoformat(timespec="seconds")}
                             if db_update(target_table,target_id,changes): st.success("Fiche technique mise à jour pour tous les collaborateurs."); st.rerun()
                     elif target_table == "cra_measurement_sheets":
                         with st.form(f"collab_measure_form_{share.get('id')}"):
@@ -2097,7 +2277,7 @@ elif page == "Référentiel des cultures":
     if crops:
         crop_df = pd.DataFrame(crops)
         st.dataframe(crop_df, use_container_width=True, hide_index=True)
-        st.download_button("Exporter le référentiel des cultures en Excel", excel_bytes({"Cultures": crop_df}),
+        download_button("Exporter le référentiel des cultures en Excel", excel_bytes({"Cultures": crop_df}),
             "ISRA_CRA_referentiel_cultures.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         crop_to_remove = st.selectbox("Culture à retirer du catalogue", [x.get("name", "") for x in crops])
         st.caption("La suppression du catalogue ne supprime pas les anciennes fiches qui utilisent cette culture.")
@@ -2163,7 +2343,7 @@ elif page == "Essais expérimentaux XXL":
     trials = db_rows("cra_trials", 2000)
     if trials:
         trials_df = pd.DataFrame(trials)
-        st.download_button("Exporter tous mes essais en Excel", excel_bytes({"Essais": trials_df}),
+        download_button("Exporter tous mes essais en Excel", excel_bytes({"Essais": trials_df}),
             "ISRA_CRA_essais.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
         trial_options = {f"{t.get('code')} — {t.get('title')}": t for t in trials}
         chosen_label = st.selectbox("Sélectionner un essai", list(trial_options))
@@ -2194,9 +2374,9 @@ elif page == "Essais expérimentaux XXL":
         st.dataframe(pd.DataFrame(observations), use_container_width=True, hide_index=True)
         if observations:
             obs_df = pd.DataFrame(observations)
-            st.download_button("📊 Télécharger Excel (.xlsx)", excel_bytes({"Observations": obs_df}),
+            download_button("📊 Télécharger Excel (.xlsx)", excel_bytes({"Observations": obs_df}),
                 f"Observations_{slugify(str(chosen_trial.get('code')))}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-            st.download_button("📄 Télécharger PDF", pdf_bytes("Observations de l'essai", obs_df),
+            download_button("📄 Télécharger PDF", pdf_bytes("Observations de l'essai", obs_df),
                 f"Observations_{slugify(str(chosen_trial.get('code')))}.pdf", "application/pdf")
     else:
         st.info("Créez votre premier protocole pour activer le registre des observations.")
@@ -2255,9 +2435,9 @@ elif page == "Diagnostic phytosanitaire XXL":
             urgent_df = diag_df[diag_df["alert_level"].isin(["Urgent", "Intervention à planifier"])]
             st.metric("Diagnostics nécessitant une attention", len(urgent_df))
         st.dataframe(diag_df, use_container_width=True, hide_index=True)
-        st.download_button("📊 Télécharger le registre Excel (.xlsx)", excel_bytes({"Diagnostics": diag_df}),
+        download_button("📊 Télécharger le registre Excel (.xlsx)", excel_bytes({"Diagnostics": diag_df}),
             "CRA_registre_phytosanitaire.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        st.download_button("📄 Télécharger le registre PDF", pdf_bytes("Registre phytosanitaire", diag_df),
+        download_button("📄 Télécharger le registre PDF", pdf_bytes("Registre phytosanitaire", diag_df),
             "CRA_registre_phytosanitaire.pdf", "application/pdf")
     else:
         st.info("Aucun diagnostic phytosanitaire enregistré.")
@@ -2352,7 +2532,7 @@ elif page == "Créer un questionnaire":
                 qr_bytes = qr_buffer.getvalue()
                 st.markdown("#### QR code du questionnaire")
                 st.image(qr_bytes, caption="Scannez ce code avec l'appareil photo du téléphone.", width=260)
-                st.download_button(
+                download_button(
                     "📥 Télécharger le QR code (PNG)", qr_bytes,
                     file_name=f"QR_QUESTIONNAIRE_{fid}.png",
                     mime="image/png", use_container_width=True,
@@ -2413,7 +2593,7 @@ elif page == "Questionnaires et réponses":
                         qr_io = BytesIO(); qr_img.save(qr_io, format="PNG")
                         qr_data = qr_io.getvalue()
                         st.image(qr_data, width=210, caption="QR code du lien public")
-                        st.download_button("Télécharger le QR code", qr_data,
+                        download_button("Télécharger le QR code", qr_data,
                             file_name=f"QR_QUESTIONNAIRE_{fid}.png", mime="image/png",
                             key=f"qr_existing_{fid}", use_container_width=True)
                     except Exception as qr_error:
@@ -2456,12 +2636,12 @@ elif page == "Questionnaires et réponses":
             display.append(row)
         df = pd.DataFrame(display)
         st.dataframe(df, use_container_width=True, hide_index=True)
-        st.download_button("Télécharger les réponses (.xlsx)",
+        download_button("Télécharger les réponses (.xlsx)",
             excel_bytes({"Réponses": df}), "CRA_reponses_questionnaires.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
-        st.download_button("Télécharger les réponses (.csv)", as_csv(display),
+        download_button("Télécharger les réponses (.csv)", as_csv(display),
             "CRA_reponses_questionnaires.csv", "text/csv")
-        st.download_button("Télécharger les réponses (.pdf)", pdf_bytes("Réponses aux questionnaires", df),
+        download_button("Télécharger les réponses (.pdf)", pdf_bytes("Réponses aux questionnaires", df),
             "CRA_reponses_questionnaires.pdf", "application/pdf")
     else:
         st.info("Aucune réponse ne correspond à ce filtre.")
@@ -2552,68 +2732,51 @@ elif page == "Données et exports":
         return candidate
 
     def _export_parts(records, module_label, nested_grid_fields=None):
-        """Un onglet Excel par fiche : informations générales puis grilles réelles dessous.
-
-        Les grilles ne sont jamais exportées dans un onglet séparé : elles restent dans
-        la même feuille que la fiche à laquelle elles appartiennent.
-        """
+        """Produit deux tables logiques : présentation des fiches et grilles fidèles."""
         nested_grid_fields = nested_grid_fields or {}
-        sheets = {}
-        used_names = set()
-
-        def safe_name(value):
-            base = re.sub(r"[\[\]:*?/\\]", "_", str(value)).strip()[:31] or "Fiche"
-            candidate, n = base, 2
-            while candidate in used_names:
-                suffix = f"_{n}"
-                candidate = base[:31-len(suffix)] + suffix
-                n += 1
-            used_names.add(candidate)
-            return candidate
-
+        presentation_rows = []
+        grid_rows = []
         for rec_no, record in enumerate(records, 1):
             identity = (record.get("code") or record.get("fiche_code") or
                         record.get("folder_code") or record.get("title") or
                         record.get("form_title") or record.get("id") or f"Fiche_{rec_no}")
-            rows = []
-            # Bloc 1 : données générales de la fiche, sous forme champ / valeur.
-            rows.append({"Champ": "INFORMATIONS DE LA FICHE", "Valeur": ""})
-            for key, value in record.items():
-                if key == "owner_email" or (key in nested_grid_fields and
-                    (_is_structured_grid(record.get(key)) or bool(_record_grid(record, key)))):
-                    continue
-                rows.append({"Champ": str(key).replace("_", " ").capitalize(), "Valeur": _plain(value)})
-
-            # Bloc 2 : chacune des grilles de la fiche, en conservant ses colonnes.
+            presentation_rows.append({"N° fiche": rec_no, "Code fiche": str(identity),
+                                      **{str(k).replace("_", " ").capitalize(): _plain(v)
+                                         for k, v in record.items()
+                                         if k not in {"id", "owner_email", "grid", "observations_periodiques",
+                                                      "observations_periodiques_json", "technical_grid", "measurement_grid",
+                                                      "grille", "mesures", "rows", "data", "payload"}
+                                         and not isinstance(v, (dict, list, tuple))}})
+            payload = record.get("payload")
+            if isinstance(payload, str):
+                try: payload = json.loads(payload)
+                except Exception: payload = {}
             for field, grid_title in nested_grid_fields.items():
-                if not _is_structured_grid(record.get(field)):
-                    continue  # conserve les champs texte libres dans les informations générales
                 grid = _record_grid(record, field)
-                rows.append({"Champ": str(grid_title).upper(), "Valeur": f"{len(grid)} ligne(s) renseignée(s)"})
-                if not grid:
-                    rows.append({"Champ": "État de la grille", "Valeur": "Aucune ligne renseignée dans cette fiche."})
-                    continue
-                columns = list(dict.fromkeys(str(col) for item in grid for col in item.keys()))
-                headers = record.get("headers") or []
-                if isinstance(headers, str):
-                    try: headers = json.loads(headers)
-                    except Exception: headers = []
-                if isinstance(headers, (list, tuple)):
-                    columns = list(dict.fromkeys([str(c) for c in headers] + columns))
+                header_key = "observations_headers" if field == "observations_periodiques" else "headers"
+                saved_headers = record.get(header_key) or record.get("headers") or []
+                if not saved_headers and isinstance(payload, dict):
+                    saved_headers = payload.get(header_key) or payload.get("headers") or []
+                if isinstance(saved_headers, str):
+                    try: saved_headers = json.loads(saved_headers)
+                    except Exception: saved_headers = []
+                columns = [str(x) for x in saved_headers] if isinstance(saved_headers, (list, tuple)) else []
+                for row in grid:
+                    for col in row:
+                        if str(col) not in columns: columns.append(str(col))
                 if not columns:
                     columns = ["Observation"]
-                # En-tête et lignes de la grille dans la même feuille que les données.
-                rows.append({"Champ": "N° ligne", **{col: col for col in columns}})
-                for line_no, item in enumerate(grid, 1):
-                    rows.append({"Champ": line_no, **{str(k): _plain(v) for k, v in item.items()}})
-
-            frame = pd.DataFrame(rows).fillna("")
-            sheet_name = safe_name(f"{rec_no}_{identity}")
-            sheets[sheet_name] = frame
-
-        if not sheets:
-            sheets[safe_name(module_label)] = pd.DataFrame([{"Information": "Aucun enregistrement sélectionné."}])
-        return sheets, None
+                for line_no, row in enumerate(grid, 1):
+                    grid_rows.append({"N° fiche": rec_no, "Code fiche": str(identity),
+                                      "Type de grille": grid_title, "N° ligne": line_no,
+                                      **{col: _plain(row.get(col, "")) for col in columns}})
+                if not grid:
+                    grid_rows.append({"N° fiche": rec_no, "Code fiche": str(identity),
+                                      "Type de grille": grid_title, "N° ligne": "",
+                                      **{col: "" for col in columns}})
+        presentation = pd.DataFrame(presentation_rows or [{"Information": "Aucun enregistrement sélectionné."}]).fillna("")
+        grids = pd.DataFrame(grid_rows).fillna("") if grid_rows else pd.DataFrame(columns=["N° fiche", "Code fiche", "Type de grille", "N° ligne"])
+        return {"Présentation": presentation, "Grilles": grids}, None
 
     def _records_pdf_bytes(title, records, nested_grid_fields=None):
         """PDF fidèle avec les champs de la fiche puis les grilles en tableaux paginables."""
@@ -2671,6 +2834,12 @@ elif page == "Données et exports":
                     story.append(Paragraph("Grille non renseignée dans cette fiche.", small))
                     continue
                 columns = list(dict.fromkeys(k for row in grid for k in row.keys()))
+                saved_headers = (rec.get("observations_headers") if field == "observations_periodiques" else rec.get("headers")) or rec.get("headers") or []
+                if isinstance(saved_headers, str):
+                    try: saved_headers = json.loads(saved_headers)
+                    except Exception: saved_headers = []
+                if isinstance(saved_headers, (list, tuple)):
+                    columns = list(dict.fromkeys([str(c) for c in saved_headers] + columns))
                 if not columns:
                     story.append(Paragraph("Aucune colonne définie.", small))
                     continue
@@ -2844,9 +3013,9 @@ elif page == "Données et exports":
         st.markdown("#### Télécharger la sélection")
         c1,c2 = st.columns(2)
         with c1:
-            st.download_button("📊 Excel — sélection + grilles", xlsx_payload or b"", f"{prefix}_SELECTION.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"{key}_xlsx", use_container_width=True, disabled=not selected_records)
+            download_button("📊 Excel — sélection + grilles", xlsx_payload or b"", f"{prefix}_SELECTION.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", key=f"{key}_xlsx", use_container_width=True, disabled=not selected_records)
         with c2:
-            st.download_button("📄 PDF — sélection + grilles", pdf_payload or b"", f"{prefix}_SELECTION.pdf", "application/pdf", key=f"{key}_pdf", use_container_width=True, disabled=not selected_records)
+            download_button("📄 PDF — sélection + grilles", pdf_payload or b"", f"{prefix}_SELECTION.pdf", "application/pdf", key=f"{key}_pdf", use_container_width=True, disabled=not selected_records)
 
     st.markdown("### 📦 Export intégral (facultatif)")
     all_measure_grid_rows=[]
@@ -2870,7 +3039,7 @@ elif page == "Données et exports":
         "Réponses":pd.DataFrame([_clean(x) for x in responses]),
         "Cultures":pd.DataFrame([_clean(x) for x in cultures]),
     }
-    st.download_button("📚 Télécharger l'espace complet (Excel)", excel_bytes(all_sheets), "ISRA_CRA_ESPACE_COMPLET.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+    download_button("📚 Télécharger l'espace complet (Excel)", excel_bytes(all_sheets), "ISRA_CRA_ESPACE_COMPLET.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
 
     export_tabs=st.tabs(["Fiches techniques", "Fiches de mesure", "Dossiers de culture", "Essais", "Observations d’essais", "Diagnostics", "Questionnaires", "Réponses aux questionnaires"])
     with export_tabs[0]:
