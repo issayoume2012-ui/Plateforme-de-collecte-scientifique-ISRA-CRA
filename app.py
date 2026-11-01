@@ -1211,7 +1211,7 @@ if u3.button("Déconnexion", use_container_width=True):
 
 
 # ---------------------------------------------------------------------
-# NAVIGATION SIMPLIFIÉE — ESPACES ET RUBRIQUES
+# NAVIGATION — GRANDS ONGLET EN HAUT / SOUS-ONGLETS EN DESSOUS
 # ---------------------------------------------------------------------
 PAGES = [
     "Tableau de bord", "Fiche technique", "Fiche de mesure",
@@ -1222,9 +1222,10 @@ PAGES = [
 ]
 USER_PAGES = [p for p in PAGES if p != "Gestion des comptes"]
 
-# Chaque rubrique conserve son nom technique et ses droits existants.
-# Seule la présentation de la navigation est regroupée pour être plus facile.
-if st.session_state.get("cra_user_role") == "Administrateur des comptes":
+# Les droits enregistrés par l'administrateur portent sur les sous-onglets.
+# Un grand onglet n'apparaît que s'il contient au moins un sous-onglet autorisé.
+is_admin = st.session_state.get("cra_user_role") == "Administrateur des comptes"
+if is_admin:
     allowed_pages = PAGES[:]
 else:
     saved_permissions = st.session_state.get("cra_user_permissions", [])
@@ -1235,49 +1236,202 @@ else:
             saved_permissions = []
     if not isinstance(saved_permissions, (list, tuple, set)):
         saved_permissions = []
-    allowed_pages = PAGES[:] if "*" in saved_permissions else [p for p in PAGES if p in saved_permissions]
+
+    # Le joker donne accès aux rubriques de travail, jamais à l'administration.
+    if "*" in saved_permissions:
+        allowed_pages = USER_PAGES[:]
+    else:
+        allowed_pages = [p for p in USER_PAGES if p in saved_permissions]
+
+    # Aucun droit attribué = aucun module affiché. On ne réactive pas
+    # silencieusement des rubriques que l'administrateur aurait désactivées.
     if not allowed_pages:
-        allowed_pages = ["Tableau de bord", "Fiche technique", "Fiche de mesure"]
+        st.warning("Aucune rubrique ne vous a été attribuée pour le moment.")
+        st.info("Contactez l'administrateur de la plateforme pour demander l'ouverture des modules nécessaires.")
+        st.stop()
 
 NAV_GROUPS = {
-    "Accueil": ["Tableau de bord"],
-    "Saisie scientifique": ["Fiche technique", "Fiche de mesure"],
-    "Cultures et expérimentation": [
+    "🏠 ACCUEIL": ["Tableau de bord"],
+    "🧾 SAISIE SCIENTIFIQUE": ["Fiche technique", "Fiche de mesure"],
+    "🌱 CULTURES & EXPÉRIMENTATION": [
         "Référentiel des cultures", "Essais expérimentaux XXL", "Diagnostic phytosanitaire XXL"
     ],
-    "Questionnaires": ["Créer un questionnaire", "Questionnaires et réponses"],
-    "Dossiers et partage": ["Dossiers de culture", "Collaboration"],
-    "Données et rapports": ["Données et exports"],
-    "Administration": ["Gestion des comptes"],
+    "📋 QUESTIONNAIRES": ["Créer un questionnaire", "Questionnaires et réponses"],
+    "📁 DOSSIERS & PARTAGE": ["Dossiers de culture", "Collaboration"],
+    "📊 DONNÉES & RAPPORTS": ["Données et exports"],
+    "⚙️ ADMINISTRATION": ["Gestion des comptes"],
 }
+
+# Filtrage à deux niveaux : les grands onglets et leurs sous-onglets
+# ne contiennent que les fonctionnalités autorisées au compte connecté.
 visible_nav = {
-    group: [p for p in pages if p in allowed_pages]
+    group: [page_name for page_name in pages if page_name in allowed_pages]
     for group, pages in NAV_GROUPS.items()
-    if any(p in allowed_pages for p in pages)
+    if any(page_name in allowed_pages for page_name in pages)
 }
 nav_groups = list(visible_nav)
+if not nav_groups:
+    st.warning("Aucun espace de travail n'est disponible pour ce compte.")
+    st.stop()
+
+# Évite de conserver une ancienne sélection si l'administrateur vient
+# de modifier les droits ou si l'utilisateur change de profil.
 if st.session_state.get("cra_nav_group") not in nav_groups:
     st.session_state["cra_nav_group"] = nav_groups[0]
+st.markdown('<div class="cra-mainnav-heading">GRANDS ESPACES DE TRAVAIL</div>', unsafe_allow_html=True)
+selected_group = st.radio(
+    "GRANDS ESPACES DE TRAVAIL",
+    options=nav_groups,
+    horizontal=True,
+    key="cra_nav_group",
+    label_visibility="collapsed",
+)
 
-st.markdown("### Votre espace de travail")
-nav_col1, nav_col2 = st.columns([1, 2])
-with nav_col1:
-    selected_group = st.selectbox(
-        "1. Choisir une activité",
-        nav_groups,
-        key="cra_nav_group",
-        help="Les rubriques sont regroupées par activité pour faciliter la navigation."
-    )
 page_options = visible_nav[selected_group]
 if st.session_state.get("cra_nav_page") not in page_options:
     st.session_state["cra_nav_page"] = page_options[0]
-with nav_col2:
-    page = st.selectbox(
-        "2. Ouvrir une rubrique",
-        page_options,
-        key="cra_nav_page"
-    )
-st.caption(f"Espace : {selected_group}  ·  Rubrique ouverte : {page}")
+
+PAGE_LABELS = {
+    "Tableau de bord": "📌 Tableau de bord",
+    "Fiche technique": "📝 Fiche technique",
+    "Fiche de mesure": "📏 Fiche de mesure",
+    "Référentiel des cultures": "🌾 Référentiel des cultures",
+    "Essais expérimentaux XXL": "🔬 Essais expérimentaux",
+    "Diagnostic phytosanitaire XXL": "🩺 Diagnostic phytosanitaire",
+    "Créer un questionnaire": "➕ Créer un questionnaire",
+    "Questionnaires et réponses": "📨 Questionnaires et réponses",
+    "Données et exports": "📊 Données et exports",
+    "Dossiers de culture": "📁 Dossiers de culture",
+    "Collaboration": "🤝 Collaboration",
+    "Gestion des comptes": "🔐 Gestion des comptes",
+}
+
+st.markdown('<div class="cra-subnav-heading">SOUS-ONGLETS DISPONIBLES</div>', unsafe_allow_html=True)
+page = st.radio(
+    "SOUS-ONGLETS AUTORISÉS",
+    options=page_options,
+    format_func=lambda value: PAGE_LABELS.get(value, value),
+    horizontal=True,
+    key="cra_nav_page",
+    label_visibility="collapsed",
+)
+
+st.markdown("""
+<style>
+/* Grands onglets : bandeau supérieur, larges cartes cliquables */
+.cra-mainnav-heading {
+    margin: 10px 0 7px 3px;
+    color: #16483F;
+    font-size: 12px;
+    font-weight: 900;
+    letter-spacing: 1.55px;
+}
+.cra-subnav-heading {
+    margin: 13px 0 7px 3px;
+    color: #16483F;
+    font-size: 11px;
+    font-weight: 900;
+    letter-spacing: 1.35px;
+}
+.st-key-cra_nav_group {
+    background: linear-gradient(115deg, #F5FBF7, #FFFFFF);
+    border: 1px solid #BFDCCB;
+    border-top: 5px solid #DDB64C;
+    border-radius: 18px;
+    padding: 12px 14px 8px;
+    margin: 8px 0 12px;
+    box-shadow: 0 7px 20px rgba(22,72,63,.08);
+}
+.st-key-cra_nav_group [role="radiogroup"] {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 9px;
+    width: 100%;
+}
+.st-key-cra_nav_group label[data-baseweb="radio"] {
+    flex: 1 1 145px;
+    min-height: 58px;
+    justify-content: center;
+    padding: 10px 13px;
+    color: #16483F;
+    font-size: 14px;
+    font-weight: 850;
+    text-align: center;
+    border: 1px solid #C8DDD0;
+    border-radius: 14px;
+    background: #FFFFFF;
+    box-shadow: 0 3px 9px rgba(22,72,63,.05);
+    transition: all .18s ease;
+}
+.st-key-cra_nav_group label[data-baseweb="radio"] > div:first-child,
+.st-key-cra_nav_page label[data-baseweb="radio"] > div:first-child {
+    display: none !important;
+}
+.st-key-cra_nav_group label[data-baseweb="radio"]:hover {
+    border-color: #247A66;
+    background: #F0F8F3;
+    transform: translateY(-1px);
+}
+.st-key-cra_nav_group label[data-baseweb="radio"]:has(input:checked) {
+    background: linear-gradient(125deg, #16483F, #247A66);
+    border-color: #16483F;
+    box-shadow: 0 5px 13px rgba(22,72,63,.20);
+}
+.st-key-cra_nav_group label[data-baseweb="radio"]:has(input:checked) * {
+    color: #FFFFFF !important;
+    font-weight: 800 !important;
+}
+
+/* Sous-onglets : cadre distinct, plus léger que le bandeau principal */
+.st-key-cra_nav_page {
+    background: #FFFFFF;
+    border: 1px solid #D6E7DC;
+    border-left: 5px solid #247A66;
+    border-radius: 16px;
+    padding: 10px 13px 7px;
+    margin: 0 0 14px;
+    box-shadow: 0 5px 16px rgba(22,72,63,.06);
+}
+.st-key-cra_nav_page [role="radiogroup"] {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+    width: 100%;
+}
+.st-key-cra_nav_page label[data-baseweb="radio"] {
+    flex: 0 1 auto;
+    min-height: 43px;
+    padding: 8px 13px;
+    color: #16483F;
+    font-size: 13px;
+    font-weight: 700;
+    border: 1px solid #CFE2D5;
+    border-radius: 11px;
+    background: #F8FCF9;
+    transition: all .18s ease;
+}
+.st-key-cra_nav_page label[data-baseweb="radio"]:hover {
+    border-color: #247A66;
+    background: #EDF7F1;
+}
+.st-key-cra_nav_page label[data-baseweb="radio"]:has(input:checked) {
+    background: #DFF0E6;
+    border-color: #247A66;
+    box-shadow: inset 0 0 0 1px #247A66;
+}
+.st-key-cra_nav_page label[data-baseweb="radio"]:has(input:checked) * {
+    color: #16483F !important;
+    font-weight: 800 !important;
+}
+@media (max-width: 700px) {
+    .st-key-cra_nav_group, .st-key-cra_nav_page { padding: 9px; }
+    .st-key-cra_nav_group label[data-baseweb="radio"] { flex: 1 1 100%; min-height: 47px; }
+    .st-key-cra_nav_page label[data-baseweb="radio"] { flex: 1 1 100%; }
+}
+</style>
+""", unsafe_allow_html=True)
+
+st.caption(f"Espace ouvert : {selected_group}  ·  {len(page_options)} sous-onglet(s) autorisé(s)")
 if DB_MESSAGE:
     st.caption(DB_MESSAGE)
 
