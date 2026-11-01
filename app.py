@@ -1199,11 +1199,11 @@ except Exception as exc:
     st.error(f"Impossible de vérifier les autorisations du compte : {exc}")
     st.stop()
 
-# Bandeau du compte connecté et déconnexion
-u1, u2, u3 = st.columns([3,2,1])
-u1.caption(f"Connecté : {st.session_state.get('cra_user_name')} · {st.session_state.get('cra_user_email')}")
+# Bandeau compact du compte connecté et déconnexion
+u1, u2, u3 = st.columns([3, 2, 1])
+u1.caption(f"👤 {st.session_state.get('cra_user_name')}  ·  {st.session_state.get('cra_user_email')}")
 u2.caption(f"Profil : {st.session_state.get('cra_user_role', 'Utilisateur')}")
-if u3.button("Déconnexion"):
+if u3.button("Déconnexion", use_container_width=True):
     for key in ["cra_authenticated", "cra_user_email", "cra_user_name", "cra_user_role", "cra_user_permissions"]:
         st.session_state.pop(key, None)
     st.rerun()
@@ -1211,7 +1211,7 @@ if u3.button("Déconnexion"):
 
 
 # ---------------------------------------------------------------------
-# NAVIGATION ET ÉTAT LOCAL
+# NAVIGATION SIMPLIFIÉE — ESPACES ET RUBRIQUES
 # ---------------------------------------------------------------------
 PAGES = [
     "Tableau de bord", "Fiche technique", "Fiche de mesure",
@@ -1220,23 +1220,66 @@ PAGES = [
     "Questionnaires et réponses", "Données et exports",
     "Dossiers de culture", "Collaboration", "Gestion des comptes",
 ]
-# Tous les onglets accessibles aux comptes ordinaires.
-# Seule la gestion des comptes reste réservée à l'administration.
-# Ne pas utiliser PAGES[:-2] ici : cela exclurait aussi « Collaboration ».
 USER_PAGES = [p for p in PAGES if p != "Gestion des comptes"]
-# Les droits sont configurés individuellement par l'administrateur.
+
+# Chaque rubrique conserve son nom technique et ses droits existants.
+# Seule la présentation de la navigation est regroupée pour être plus facile.
 if st.session_state.get("cra_user_role") == "Administrateur des comptes":
     allowed_pages = PAGES[:]
 else:
     saved_permissions = st.session_state.get("cra_user_permissions", [])
-    allowed_pages = PAGES[:] if "*" in saved_permissions else [x for x in PAGES if x in saved_permissions]
-    # Un compte ancien sans droits définis reçoit un espace limité de saisie.
+    if isinstance(saved_permissions, str):
+        try:
+            saved_permissions = json.loads(saved_permissions)
+        except Exception:
+            saved_permissions = []
+    if not isinstance(saved_permissions, (list, tuple, set)):
+        saved_permissions = []
+    allowed_pages = PAGES[:] if "*" in saved_permissions else [p for p in PAGES if p in saved_permissions]
     if not allowed_pages:
         allowed_pages = ["Tableau de bord", "Fiche technique", "Fiche de mesure"]
-page = st.radio("ESPACE DE TRAVAIL — RUBRIQUES AUTORISÉES", allowed_pages,
-                horizontal=True, label_visibility="collapsed")
+
+NAV_GROUPS = {
+    "Accueil": ["Tableau de bord"],
+    "Saisie scientifique": ["Fiche technique", "Fiche de mesure"],
+    "Cultures et expérimentation": [
+        "Référentiel des cultures", "Essais expérimentaux XXL", "Diagnostic phytosanitaire XXL"
+    ],
+    "Questionnaires": ["Créer un questionnaire", "Questionnaires et réponses"],
+    "Dossiers et partage": ["Dossiers de culture", "Collaboration"],
+    "Données et rapports": ["Données et exports"],
+    "Administration": ["Gestion des comptes"],
+}
+visible_nav = {
+    group: [p for p in pages if p in allowed_pages]
+    for group, pages in NAV_GROUPS.items()
+    if any(p in allowed_pages for p in pages)
+}
+nav_groups = list(visible_nav)
+if st.session_state.get("cra_nav_group") not in nav_groups:
+    st.session_state["cra_nav_group"] = nav_groups[0]
+
+st.markdown("### Votre espace de travail")
+nav_col1, nav_col2 = st.columns([1, 2])
+with nav_col1:
+    selected_group = st.selectbox(
+        "1. Choisir une activité",
+        nav_groups,
+        key="cra_nav_group",
+        help="Les rubriques sont regroupées par activité pour faciliter la navigation."
+    )
+page_options = visible_nav[selected_group]
+if st.session_state.get("cra_nav_page") not in page_options:
+    st.session_state["cra_nav_page"] = page_options[0]
+with nav_col2:
+    page = st.selectbox(
+        "2. Ouvrir une rubrique",
+        page_options,
+        key="cra_nav_page"
+    )
+st.caption(f"Espace : {selected_group}  ·  Rubrique ouverte : {page}")
 if DB_MESSAGE:
-    st.success(DB_MESSAGE)
+    st.caption(DB_MESSAGE)
 
 # ---------------------------------------------------------------------
 # TABLEAU DE BORD
@@ -2044,118 +2087,324 @@ elif page == "Fiche de mesure":
                     st.rerun()
 
 # ---------------------------------------------------------------------
-# DOSSIERS DE CULTURE — ARCHIVAGE ET TRACABILITE
+# DOSSIERS DE CULTURE — CLASSEMENT SIMPLIFIÉ
 # ---------------------------------------------------------------------
 elif page == "Dossiers de culture":
-    heading("Archivage scientifique · ISRA / CRA", "DOSSIERS DE CULTURE",
-            "Un dossier par culture, campagne ou essai : regroupez les fiches techniques et toutes les campagnes de mesures, puis retrouvez-les et téléchargez-les à tout moment.")
-    with st.expander("＋ Ouvrir un nouveau dossier de culture", expanded=True):
+    heading(
+        "Classement scientifique · ISRA / CRA",
+        "MES DOSSIERS DE CULTURE",
+        "Un dossier rassemble les fiches techniques et les mesures d'une culture, d'une campagne ou d'un essai."
+    )
+    st.info(
+        "Mode d'emploi : 1) choisissez un dossier, 2) consultez ses fiches, "
+        "3) classez les anciennes fiches si nécessaire, 4) téléchargez les archives."
+    )
+
+    folders = db_rows("cra_culture_folders", 3000)
+    all_tech = db_rows("cra_technical_sheets", 5000)
+    all_measures = db_rows("cra_measurement_sheets", 5000)
+
+    # Le formulaire de création reste disponible même lorsque la base est vide.
+    with st.expander("＋ Créer un nouveau dossier", expanded=not bool(folders)):
         with st.form("create_culture_folder", clear_on_submit=True):
-            a,b,c = st.columns(3)
-            with a:
-                folder_name = st.text_input("Nom du dossier", placeholder="Ex. Riz — Essai variétal 2026")
-                folder_culture = choose_culture("Culture", "folder_create_culture")
-            with b:
+            folder_name = st.text_input(
+                "Nom du dossier *",
+                placeholder="Ex. : Riz — Essai variétal 2026"
+            )
+            folder_culture = choose_culture("Culture *", "folder_create_culture")
+            col_a, col_b = st.columns(2)
+            with col_a:
                 folder_campaign = st.text_input("Campagne / année", str(date.today().year))
                 folder_station = st.text_input("Station / site")
-            with c:
+            with col_b:
                 folder_responsible = st.text_input("Responsable du dossier")
-                folder_description = st.text_area("Objet et description", height=75)
-            create_folder = st.form_submit_button("📁 Créer et ouvrir le dossier", type="primary", use_container_width=True)
+                folder_description = st.text_area("Objet / description", height=80)
+            create_folder = st.form_submit_button(
+                "📁 Créer le dossier",
+                type="primary",
+                use_container_width=True
+            )
         if create_folder:
             if not folder_name.strip() or not folder_culture.strip():
                 st.error("Le nom du dossier et la culture sont obligatoires.")
             else:
                 folder_id = str(uuid.uuid4())
-                folder_payload = {"id":folder_id,"folder_code":f"DC-{uuid.uuid4().hex[:8].upper()}",
-                    "folder_name":folder_name.strip(),"culture":folder_culture,"campaign":folder_campaign,
-                    "station":folder_station,"responsible":folder_responsible,"description":folder_description,
-                    "created_at":datetime.now().isoformat(timespec="seconds")}
+                folder_payload = {
+                    "id": folder_id,
+                    "folder_code": f"DC-{uuid.uuid4().hex[:8].upper()}",
+                    "folder_name": folder_name.strip(),
+                    "culture": folder_culture,
+                    "campaign": folder_campaign,
+                    "station": folder_station,
+                    "responsible": folder_responsible,
+                    "description": folder_description,
+                    "created_at": datetime.now().isoformat(timespec="seconds")
+                }
                 if db_insert("cra_culture_folders", folder_payload):
                     st.session_state["selected_cra_folder"] = folder_id
-                    st.success("Dossier créé. Vous pouvez maintenant y déposer vos fiches techniques et fiches de mesures.")
+                    st.session_state["cra_active_folder"] = folder_id
+                    st.success("Dossier créé. Il est maintenant sélectionné.")
                     st.rerun()
 
     folders = db_rows("cra_culture_folders", 3000)
     if not folders:
-        st.info("Aucun dossier de culture. Créez votre premier dossier ci-dessus.")
+        st.info("Aucun dossier pour le moment. Créez votre premier dossier ci-dessus.")
     else:
-        folder_lookup = {f.get("id"): f for f in folders}
+        folder_lookup = {str(f.get("id")): f for f in folders if f.get("id")}
         folder_ids = list(folder_lookup)
-        default_folder = st.session_state.get("selected_cra_folder")
-        default_idx = folder_ids.index(default_folder) if default_folder in folder_ids else 0
-        selected_folder_id = st.selectbox("📂 Ouvrir un dossier", folder_ids, index=default_idx,
-            format_func=lambda fid: f"{folder_lookup[fid].get('culture','')} — {folder_lookup[fid].get('folder_name','')} ({folder_lookup[fid].get('folder_code','')})")
+        preferred_folder = st.session_state.get("selected_cra_folder")
+        active_folder = st.session_state.get("cra_active_folder")
+        if preferred_folder in folder_ids:
+            initial_folder = preferred_folder
+        elif active_folder in folder_ids:
+            initial_folder = active_folder
+        else:
+            initial_folder = folder_ids[0]
+        if st.session_state.get("cra_active_folder") != initial_folder:
+            st.session_state["cra_active_folder"] = initial_folder
+
+        folder_labels = {
+            fid: (
+                f"{folder_lookup[fid].get('culture', 'Culture non précisée')} — "
+                f"{folder_lookup[fid].get('folder_name', 'Dossier sans nom')} "
+                f"· {folder_lookup[fid].get('campaign', '')} "
+                f"[{folder_lookup[fid].get('folder_code', '')}]"
+            )
+            for fid in folder_ids
+        }
+        selected_folder_id = st.selectbox(
+            "📂 Dossier à ouvrir",
+            options=folder_ids,
+            format_func=lambda fid: folder_labels[fid],
+            key="cra_active_folder"
+        )
         st.session_state["selected_cra_folder"] = selected_folder_id
         folder = folder_lookup[selected_folder_id]
-        st.markdown(f"<div class='card'><h3>📁 {folder.get('folder_name','Dossier')}</h3><b>Culture :</b> {folder.get('culture','')} &nbsp; · &nbsp; <b>Campagne :</b> {folder.get('campaign','')}<br><b>Station :</b> {folder.get('station','')} &nbsp; · &nbsp; <b>Responsable :</b> {folder.get('responsible','')}<br>{folder.get('description','')}<hr><b>Code dossier :</b> {folder.get('folder_code','')}</div>", unsafe_allow_html=True)
-        all_tech = db_rows("cra_technical_sheets", 5000)
-        all_measures = db_rows("cra_measurement_sheets", 5000)
+        folder_name_display = str(folder.get("folder_name") or "Dossier")
+
         folder_tech = [r for r in all_tech if r.get("folder_id") == selected_folder_id]
         folder_measures = [r for r in all_measures if r.get("folder_id") == selected_folder_id]
-        m1,m2,m3 = st.columns(3)
-        m1.metric("Fiches techniques", len(folder_tech))
-        m2.metric("Fiches de mesures", len(folder_measures))
-        m3.metric("Total des documents", len(folder_tech)+len(folder_measures))
-        if folder_tech:
-            st.markdown("#### Fiches techniques déposées")
-            st.dataframe(pd.DataFrame([{"Code":r.get("code"),"Année":r.get("annee"),"Station":r.get("station"),"Responsables":r.get("responsables"),"Date":r.get("date_collecte")} for r in folder_tech]), use_container_width=True, hide_index=True)
-        if folder_measures:
-            st.markdown("#### Fiches de mesures déposées")
-            st.dataframe(pd.DataFrame([{"Code":r.get("fiche_code"),"Essai":r.get("essai"),"Année":r.get("annee"),"Date de mesure":r.get("date_mesure"),"Paramètres":r.get("parametres")} for r in folder_measures]), use_container_width=True, hide_index=True)
-        if not folder_tech and not folder_measures:
-            st.info("Ce dossier est ouvert mais ne contient pas encore de fiche. Dans les modules Fiche technique et Fiche de mesure, sélectionnez ce dossier avant l'enregistrement.")
 
-        # Permet de classer dans un dossier les anciennes fiches déjà enregistrées.
-        with st.expander("↪ Classer ou déplacer des fiches déjà enregistrées"):
-            tech_choices = {f"Fiche technique · {r.get('culture','')} · {r.get('code','')} · Dossier actuel : {r.get('folder_name') or 'Aucun'}": ("cra_technical_sheets", r.get("id")) for r in all_tech}
-            measure_choices = {f"Fiche de mesures · {r.get('culture','')} · {r.get('fiche_code','')} · Dossier actuel : {r.get('folder_name') or 'Aucun'}": ("cra_measurement_sheets", r.get("id")) for r in all_measures}
+        st.markdown(f"### 📁 {folder_name_display}")
+        detail_col1, detail_col2, detail_col3 = st.columns(3)
+        detail_col1.caption(f"Culture : **{folder.get('culture', '—')}**")
+        detail_col2.caption(f"Campagne : **{folder.get('campaign', '—')}**")
+        detail_col3.caption(f"Code : **{folder.get('folder_code', '—')}**")
+        if folder.get("station") or folder.get("responsible"):
+            st.caption(
+                f"Station : {folder.get('station') or '—'}  ·  "
+                f"Responsable : {folder.get('responsible') or '—'}"
+            )
+        if folder.get("description"):
+            st.write(folder.get("description"))
+
+        metric_a, metric_b, metric_c = st.columns(3)
+        metric_a.metric("Fiches techniques", len(folder_tech))
+        metric_b.metric("Fiches de mesures", len(folder_measures))
+        metric_c.metric("Total des fiches", len(folder_tech) + len(folder_measures))
+
+        tab_content, tab_classify, tab_download = st.tabs([
+            "📄 Contenu du dossier",
+            "🗂️ Classer des fiches",
+            "⬇️ Télécharger le dossier"
+        ])
+
+        with tab_content:
+            if folder_tech:
+                st.markdown("#### Fiches techniques")
+                tech_view = [{
+                    "Code": r.get("code"),
+                    "Année": r.get("annee"),
+                    "Station": r.get("station"),
+                    "Responsables": r.get("responsables"),
+                    "Date": r.get("date_collecte")
+                } for r in folder_tech]
+                st.dataframe(pd.DataFrame(tech_view), use_container_width=True, hide_index=True)
+            if folder_measures:
+                st.markdown("#### Fiches de mesures")
+                measure_view = [{
+                    "Code": r.get("fiche_code"),
+                    "Essai": r.get("essai"),
+                    "Année": r.get("annee"),
+                    "Date de mesure": r.get("date_mesure"),
+                    "Paramètres": r.get("parametres")
+                } for r in folder_measures]
+                st.dataframe(pd.DataFrame(measure_view), use_container_width=True, hide_index=True)
+            if not folder_tech and not folder_measures:
+                st.info(
+                    "Ce dossier est vide. Pour ajouter une fiche, ouvrez « Fiche technique » "
+                    "ou « Fiche de mesure » et choisissez ce dossier dans le champ de classement."
+                )
+
+        with tab_classify:
+            st.write(
+                "Cette fonction sert à ranger ici des fiches déjà enregistrées, "
+                "sans avoir à les ressaisir. Vous pouvez aussi déplacer une fiche d'un autre dossier."
+            )
+            tech_choices = {}
+            for r in all_tech:
+                record_id = str(r.get("id") or "")
+                if not record_id:
+                    continue
+                label = (
+                    f"Fiche technique — {r.get('culture', 'Culture')} — "
+                    f"{r.get('code') or 'Sans code'} — dossier actuel : "
+                    f"{r.get('folder_name') or 'Aucun'} — {record_id[:8]}"
+                )
+                tech_choices[label] = ("cra_technical_sheets", record_id)
+            measure_choices = {}
+            for r in all_measures:
+                record_id = str(r.get("id") or "")
+                if not record_id:
+                    continue
+                label = (
+                    f"Fiche de mesure — {r.get('culture', 'Culture')} — "
+                    f"{r.get('fiche_code') or 'Sans code'} — dossier actuel : "
+                    f"{r.get('folder_name') or 'Aucun'} — {record_id[:8]}"
+                )
+                measure_choices[label] = ("cra_measurement_sheets", record_id)
             all_choices = {**tech_choices, **measure_choices}
-            selected_to_file = st.multiselect("Sélectionner les fiches à déposer ou déplacer vers ce dossier", list(all_choices), key=f"file_existing_{selected_folder_id}")
-            if st.button("📂 Classer / déplacer les fiches sélectionnées", key=f"attach_existing_{selected_folder_id}", type="primary", disabled=not selected_to_file):
-                moved = 0
-                for label in selected_to_file:
-                    table_name, record_id = all_choices[label]
-                    if record_id and db_update(table_name, record_id, {"folder_id": selected_folder_id, "folder_name": f"{folder.get('culture','')} · {folder.get('folder_name','')}"}): moved += 1
-                st.success(f"{moved} fiche(s) classée(s) ou déplacée(s) dans le dossier.")
-                st.rerun()
+            if all_choices:
+                selected_to_file = st.multiselect(
+                    "Sélectionner une ou plusieurs fiches",
+                    options=list(all_choices),
+                    key=f"file_existing_{selected_folder_id}"
+                )
+                if st.button(
+                    "📂 Ranger les fiches dans ce dossier",
+                    key=f"attach_existing_{selected_folder_id}",
+                    type="primary",
+                    disabled=not selected_to_file,
+                    use_container_width=True
+                ):
+                    moved = 0
+                    for label in selected_to_file:
+                        table_name, record_id = all_choices[label]
+                        if db_update(table_name, record_id, {
+                            "folder_id": selected_folder_id,
+                            "folder_name": f"{folder.get('culture', '')} · {folder_name_display}"
+                        }):
+                            moved += 1
+                    st.success(f"{moved} fiche(s) classée(s) ou déplacée(s).")
+                    st.rerun()
+            else:
+                st.info("Aucune fiche enregistrée à classer pour le moment.")
 
-        # Classeur consolidé : toutes les fiches du dossier, leurs métadonnées et observations.
-        tech_meta_rows=[]; tech_obs_rows=[]; measure_meta_rows=[]; measure_grid_rows=[]
-        for r in folder_tech:
-            tech_meta_rows.append({k:(json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list)) else v) for k,v in r.items() if k not in ("observations_periodiques",)})
-            for idx, obs in enumerate(_normalize_grid_rows(r.get("observations_periodiques")), start=1):
-                tech_obs_rows.append({"Code fiche":r.get("code"),"Culture":r.get("culture"),"N° observation":idx,**obs})
-        for r in folder_measures:
-            measure_meta_rows.append({k:(json.dumps(v,ensure_ascii=False) if isinstance(v,(dict,list)) else v) for k,v in r.items() if k not in ("grid",)})
-            grid = _normalize_grid_rows(r.get("grid"))
-            for idx, obs in enumerate(grid, start=1):
-                if isinstance(obs,dict): measure_grid_rows.append({"Code fiche":r.get("fiche_code"),"Culture":r.get("culture"),"Essai":r.get("essai"),"N° ligne":idx,**obs})
-        folder_excel = excel_bytes({
-            "Dossier":pd.DataFrame([{"Code dossier":folder.get("folder_code"),"Dossier":folder.get("folder_name"),"Culture":folder.get("culture"),"Campagne":folder.get("campaign"),"Station":folder.get("station"),"Responsable":folder.get("responsible"),"Description":folder.get("description")}]),
-            "Fiches_techniques":pd.DataFrame(tech_meta_rows),
-            "Observations_tech":pd.DataFrame(tech_obs_rows),
-            "Fiches_mesures":pd.DataFrame(measure_meta_rows),
-            "Grilles_mesures":pd.DataFrame(measure_grid_rows),
-        })
-        st.markdown("#### Téléchargements du dossier")
-        d1,d2,d3 = st.columns(3)
-        download_button("📊 TOUT télécharger en Excel", folder_excel,
-            f"DOSSIER_{slugify(folder.get('folder_name','culture'))}_ISRA.xlsx",
-            "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
-        combined_rows = ([{"Type":"Fiche technique", "Code":r.get("code"), "Culture":r.get("culture"), "Date":r.get("date_collecte"), "Résumé":r.get("objectif","")} for r in folder_tech] +
-                         [{"Type":"Fiche de mesures", "Code":r.get("fiche_code"), "Culture":r.get("culture"), "Date":r.get("date_mesure"), "Résumé":r.get("parametres","")} for r in folder_measures])
-        download_button("📄 Rapport PDF du dossier", pdf_bytes("DOSSIER DE CULTURE — " + str(folder.get("folder_name","")), pd.DataFrame(combined_rows or [{"Information":"Aucune fiche déposée"}])),
-            f"RAPPORT_{slugify(folder.get('folder_name','culture'))}.pdf", "application/pdf", use_container_width=True)
-        # Archive CSV : métadonnées et matrices au format exploitable par R/Python.
-        csv_zip_io = BytesIO()
-        with zipfile.ZipFile(csv_zip_io, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr("fiches_techniques.csv", pd.DataFrame(tech_meta_rows).to_csv(index=False).encode("utf-8-sig"))
-            zf.writestr("observations_techniques.csv", pd.DataFrame(tech_obs_rows).to_csv(index=False).encode("utf-8-sig"))
-            zf.writestr("fiches_mesures.csv", pd.DataFrame(measure_meta_rows).to_csv(index=False).encode("utf-8-sig"))
-            zf.writestr("grilles_mesures.csv", pd.DataFrame(measure_grid_rows).to_csv(index=False).encode("utf-8-sig"))
-        download_button("📦 CSV complets (ZIP)", csv_zip_io.getvalue(),
-            f"CSV_{slugify(folder.get('folder_name','culture'))}.zip", "application/zip", use_container_width=True)
+        with tab_download:
+            # Les tableaux d'observations sont conservés dans les exports séparés.
+            tech_meta_rows = []
+            tech_obs_rows = []
+            measure_meta_rows = []
+            measure_grid_rows = []
+            for r in folder_tech:
+                tech_meta_rows.append({
+                    k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v)
+                    for k, v in r.items() if k != "observations_periodiques"
+                })
+                for idx, obs in enumerate(_normalize_grid_rows(r.get("observations_periodiques")), start=1):
+                    tech_obs_rows.append({
+                        "Code fiche": r.get("code"),
+                        "Culture": r.get("culture"),
+                        "N° observation": idx,
+                        **obs
+                    })
+            for r in folder_measures:
+                measure_meta_rows.append({
+                    k: (json.dumps(v, ensure_ascii=False) if isinstance(v, (dict, list)) else v)
+                    for k, v in r.items() if k != "grid"
+                })
+                grid = _normalize_grid_rows(r.get("grid"))
+                for idx, obs in enumerate(grid, start=1):
+                    if isinstance(obs, dict):
+                        measure_grid_rows.append({
+                            "Code fiche": r.get("fiche_code"),
+                            "Culture": r.get("culture"),
+                            "Essai": r.get("essai"),
+                            "N° ligne": idx,
+                            **obs
+                        })
+
+            folder_excel = excel_bytes({
+                "Dossier": pd.DataFrame([{
+                    "Code dossier": folder.get("folder_code"),
+                    "Dossier": folder.get("folder_name"),
+                    "Culture": folder.get("culture"),
+                    "Campagne": folder.get("campaign"),
+                    "Station": folder.get("station"),
+                    "Responsable": folder.get("responsible"),
+                    "Description": folder.get("description")
+                }]),
+                "Fiches_techniques": pd.DataFrame(tech_meta_rows),
+                "Observations_tech": pd.DataFrame(tech_obs_rows),
+                "Fiches_mesures": pd.DataFrame(measure_meta_rows),
+                "Grilles_mesures": pd.DataFrame(measure_grid_rows)
+            })
+            combined_rows = (
+                [{
+                    "Type": "Fiche technique",
+                    "Code": r.get("code"),
+                    "Culture": r.get("culture"),
+                    "Date": r.get("date_collecte"),
+                    "Résumé": r.get("objectif", "")
+                } for r in folder_tech]
+                + [{
+                    "Type": "Fiche de mesures",
+                    "Code": r.get("fiche_code"),
+                    "Culture": r.get("culture"),
+                    "Date": r.get("date_mesure"),
+                    "Résumé": r.get("parametres", "")
+                } for r in folder_measures]
+            )
+            pdf_payload = pdf_bytes(
+                "DOSSIER DE CULTURE — " + folder_name_display,
+                pd.DataFrame(combined_rows or [{"Information": "Aucune fiche déposée"}])
+            )
+
+            csv_zip_io = BytesIO()
+            with zipfile.ZipFile(csv_zip_io, "w", zipfile.ZIP_DEFLATED) as zf:
+                zf.writestr(
+                    "fiches_techniques.csv",
+                    pd.DataFrame(tech_meta_rows).to_csv(index=False).encode("utf-8-sig")
+                )
+                zf.writestr(
+                    "observations_techniques.csv",
+                    pd.DataFrame(tech_obs_rows).to_csv(index=False).encode("utf-8-sig")
+                )
+                zf.writestr(
+                    "fiches_mesures.csv",
+                    pd.DataFrame(measure_meta_rows).to_csv(index=False).encode("utf-8-sig")
+                )
+                zf.writestr(
+                    "grilles_mesures.csv",
+                    pd.DataFrame(measure_grid_rows).to_csv(index=False).encode("utf-8-sig")
+                )
+
+            st.write("Téléchargez le dossier dans le format qui vous convient :")
+            dl_a, dl_b, dl_c = st.columns(3)
+            with dl_a:
+                download_button(
+                    "📊 Classeur Excel complet",
+                    folder_excel,
+                    f"DOSSIER_{slugify(folder_name_display)}_ISRA.xlsx",
+                    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                    use_container_width=True
+                )
+            with dl_b:
+                download_button(
+                    "📄 Rapport PDF",
+                    pdf_payload,
+                    f"RAPPORT_{slugify(folder_name_display)}.pdf",
+                    "application/pdf",
+                    use_container_width=True
+                )
+            with dl_c:
+                download_button(
+                    "📦 Archives CSV (ZIP)",
+                    csv_zip_io.getvalue(),
+                    f"CSV_{slugify(folder_name_display)}.zip",
+                    "application/zip",
+                    use_container_width=True
+                )
 
 # ---------------------------------------------------------------------
 # COLLABORATION — PARTAGE ET CONTINUITE DES TRAVAUX
