@@ -585,11 +585,26 @@ def excel_bytes(sheets: dict[str, pd.DataFrame]) -> bytes:
             ws.row_dimensions[5].height = 30
             for row_idx in range(6, ws.max_row + 1):
                 ws.row_dimensions[row_idx].height = 24
+                first_value = str(ws.cell(row_idx, 1).value or "").strip()
+                second_value = str(ws.cell(row_idx, 2).value or "").strip() if ncols >= 2 else ""
+                is_section = (first_value in {"INFORMATIONS DE LA FICHE"} or
+                              (first_value.isupper() and bool(first_value) and
+                               ("GRILLE" in first_value or "OBSERVATION" in first_value or
+                                "MESURE" in first_value or "QUESTION" in first_value or
+                                "RÉPONSE" in first_value or "REPONSE" in first_value or
+                                "MODALITÉ" in first_value or "MODALITE" in first_value)))
+                is_grid_header = first_value == "N° ligne"
                 for cell in ws[row_idx]:
                     cell.font = Font(name="Aptos", size=9, color="18352A")
                     cell.alignment = Alignment(vertical="top", wrap_text=True)
                     cell.border = Border(left=thin, right=thin, top=thin, bottom=thin)
-                    if row_idx % 2 == 0:
+                    if is_section:
+                        cell.fill = PatternFill("solid", fgColor=green)
+                        cell.font = Font(name="Aptos", size=9, bold=True, color="FFFFFF")
+                    elif is_grid_header:
+                        cell.fill = PatternFill("solid", fgColor="BFE9DE")
+                        cell.font = Font(name="Aptos", size=9, bold=True, color=dark)
+                    elif row_idx % 2 == 0:
                         cell.fill = PatternFill("solid", fgColor=pale)
 
             for col_idx in range(1, ncols + 1):
@@ -2448,29 +2463,56 @@ elif page == "Données et exports":
         return candidate
 
     def _export_parts(records, module_label, nested_grid_fields=None):
-        """Construit un classeur fidèle : métadonnées + vraies grilles tabulaires."""
+        """Un onglet Excel par fiche : informations générales puis grilles réelles dessous.
+
+        Les grilles ne sont jamais exportées dans un onglet séparé : elles restent dans
+        la même feuille que la fiche à laquelle elles appartiennent.
+        """
         nested_grid_fields = nested_grid_fields or {}
-        main_rows, grid_rows = [], {}
+        sheets = {}
+        used_names = set()
+
+        def safe_name(value):
+            base = re.sub(r"[\[\]:*?/\\]", "_", str(value)).strip()[:31] or "Fiche"
+            candidate, n = base, 2
+            while candidate in used_names:
+                suffix = f"_{n}"
+                candidate = base[:31-len(suffix)] + suffix
+                n += 1
+            used_names.add(candidate)
+            return candidate
+
         for rec_no, record in enumerate(records, 1):
-            parsed_grids = {field: _as_rows(record.get(field)) for field in nested_grid_fields}
-            # Ne retire du tableau principal que les champs réellement structurés en grille.
-            grid_fields_present = {field for field, rows in parsed_grids.items() if rows}
-            main = {k: _plain(v) for k, v in record.items()
-                    if k not in grid_fields_present and k != "owner_email"}
-            main_rows.append(main)
-            identity = record.get("code") or record.get("fiche_code") or record.get("folder_code") or record.get("id") or rec_no
-            for field, sheet_label in nested_grid_fields.items():
-                rows = parsed_grids[field]
-                if not rows:
+            identity = (record.get("code") or record.get("fiche_code") or
+                        record.get("folder_code") or record.get("title") or
+                        record.get("form_title") or record.get("id") or f"Fiche_{rec_no}")
+            rows = []
+            # Bloc 1 : données générales de la fiche, sous forme champ / valeur.
+            rows.append({"Champ": "INFORMATIONS DE LA FICHE", "Valeur": ""})
+            for key, value in record.items():
+                if key == "owner_email" or key in nested_grid_fields:
                     continue
-                target = grid_rows.setdefault(sheet_label, [])
-                for line_no, item in enumerate(rows, 1):
-                    target.append({"Référence fiche": str(identity), "N° ligne": line_no,
-                                   **{str(k): _plain(v) for k, v in item.items()}})
-        sheets = {str(module_label)[:31]: pd.DataFrame(main_rows or [{"Information": "Aucun enregistrement"}])}
-        for name, rows in grid_rows.items():
-            sheets[str(name)[:31]] = pd.DataFrame(rows)
-        # PDF : métadonnées lisibles et chaque grille présentée comme une vraie matrice.
+                rows.append({"Champ": str(key).replace("_", " ").capitalize(), "Valeur": _plain(value)})
+
+            # Bloc 2 : chacune des grilles de la fiche, en conservant ses colonnes.
+            for field, grid_title in nested_grid_fields.items():
+                grid = _as_rows(record.get(field))
+                rows.append({"Champ": str(grid_title).upper(), "Valeur": f"{len(grid)} ligne(s) renseignée(s)"})
+                if not grid:
+                    rows.append({"Champ": "État de la grille", "Valeur": "Aucune ligne renseignée dans cette fiche."})
+                    continue
+                columns = list(dict.fromkeys(str(col) for item in grid for col in item.keys()))
+                # En-tête et lignes de la grille dans la même feuille que les données.
+                rows.append({"Champ": "N° ligne", **{col: col for col in columns}})
+                for line_no, item in enumerate(grid, 1):
+                    rows.append({"Champ": line_no, **{str(k): _plain(v) for k, v in item.items()}})
+
+            frame = pd.DataFrame(rows).fillna("")
+            sheet_name = safe_name(f"{rec_no}_{identity}")
+            sheets[sheet_name] = frame
+
+        if not sheets:
+            sheets[safe_name(module_label)] = pd.DataFrame([{"Information": "Aucun enregistrement sélectionné."}])
         return sheets, None
 
     def _records_pdf_bytes(title, records, nested_grid_fields=None):
