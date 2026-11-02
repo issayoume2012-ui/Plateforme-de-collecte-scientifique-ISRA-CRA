@@ -3469,6 +3469,124 @@ elif page == "Données et exports":
                 if db_update(table, str(edit_record.get("id")), edits):
                     st.success("Fiche modifiée et classement enregistré.")
                     st.rerun()
+
+            # Suppression définitive encadrée : propriétaire uniquement,
+            # sauvegarde téléchargeable, confirmation explicite et motif obligatoire.
+            with st.expander("🗑️ Suppression définitive d’une donnée", expanded=False):
+                record_id = str(edit_record.get("id", ""))
+                short_id = record_id[-6:] if record_id else ""
+                st.warning(
+                    "Cette opération efface définitivement l’enregistrement de la base active. "
+                    "Elle ne doit être utilisée qu’en cas d’erreur ou de doublon avéré. "
+                    "Le journal d’audit conserve une trace de l’opération, mais ne remplace pas une sauvegarde."
+                )
+                st.write(f"**Rubrique :** {label}  ·  **Identifiant :** `{record_id}`")
+                st.write("**Donnée sélectionnée :** " + _label(edit_record))
+                backup_bytes = json.dumps(edit_record, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+                st.download_button(
+                    "⬇️ Télécharger une copie de sauvegarde avant suppression (.json)",
+                    data=backup_bytes,
+                    file_name=f"SAUVEGARDE_AVANT_SUPPRESSION_{table}_{short_id}.json",
+                    mime="application/json",
+                    key=f"{key}_delete_backup_{short_id}",
+                    use_container_width=True,
+                )
+                st.caption(
+                    "Protocole : 1) téléchargez la sauvegarde ; 2) vérifiez la fiche et son identifiant ; "
+                    "3) indiquez le motif ; 4) saisissez le code de confirmation ; 5) confirmez."
+                )
+                reason = st.text_area(
+                    "Motif obligatoire de la suppression (15 caractères minimum)",
+                    key=f"{key}_delete_reason_{short_id}",
+                    placeholder="Ex. : doublon confirmé après vérification avec le responsable scientifique…",
+                )
+                confirmation_code = st.text_input(
+                    f"Pour confirmer, saisissez exactement : SUPPRIMER {short_id}",
+                    key=f"{key}_delete_code_{short_id}",
+                )
+                backup_ack = st.checkbox(
+                    "J’ai téléchargé la sauvegarde et vérifié qu’il s’agit bien de la donnée à supprimer.",
+                    key=f"{key}_delete_backup_ack_{short_id}",
+                )
+                if st.button(
+                    "⚠️ CONFIRMER LA SUPPRESSION DÉFINITIVE",
+                    key=f"{key}_delete_confirm_{short_id}",
+                    type="primary",
+                    use_container_width=True,
+                ):
+                    current_email = st.session_state.get("cra_user_email", "")
+                    if not current_email:
+                        st.error("Session invalide : reconnectez-vous avant toute suppression.")
+                    elif not backup_ack:
+                        st.error("Téléchargez et vérifiez d’abord la sauvegarde, puis cochez la confirmation.")
+                    elif len(reason.strip()) < 15:
+                        st.error("Le motif est obligatoire et doit contenir au moins 15 caractères.")
+                    elif confirmation_code.strip() != f"SUPPRIMER {short_id}":
+                        st.error("Code de confirmation incorrect. Aucune donnée n’a été supprimée.")
+                    else:
+                        try:
+                            # Relecture directe juste avant l'action : ne pas se fier au cache Streamlit.
+                            fresh = (_SUPABASE.table(table).select("id,owner_email,payload,created_at")
+                                     .eq("id", record_id).limit(1).execute().data or [])
+                            if not fresh:
+                                st.error("Cette donnée n’existe déjà plus. Actualisez la page.")
+                            else:
+                                stored = fresh[0]
+                                payload_now = stored.get("payload") or {}
+                                if isinstance(payload_now, str):
+                                    try: payload_now = json.loads(payload_now)
+                                    except Exception: payload_now = {}
+                                is_owner = (stored.get("owner_email") == current_email or
+                                            payload_now.get("owner_email") == current_email or
+                                            payload_now.get("created_by") == current_email)
+                                if not is_owner:
+                                    st.error("Suppression refusée : vous n’êtes pas propriétaire de cet enregistrement.")
+                                else:
+                                    # Empêcher la suppression d'un parent qui possède encore des données liées.
+                                    dependencies = []
+                                    if table == "cra_culture_folders":
+                                        for child_table in ("cra_technical_sheets", "cra_measurement_sheets"):
+                                            child = (_SUPABASE.table(child_table).select("id")
+                                                     .filter("payload->>folder_id", "eq", record_id).limit(1).execute().data or [])
+                                            if child: dependencies.append(child_table)
+                                    elif table == "cra_forms":
+                                        child = (_SUPABASE.table("cra_responses").select("id")
+                                                 .filter("payload->>form_id", "eq", record_id).limit(1).execute().data or [])
+                                        if child: dependencies.append("cra_responses")
+                                    elif table == "cra_trials":
+                                        child = (_SUPABASE.table("cra_trial_observations").select("id")
+                                                 .filter("payload->>trial_id", "eq", record_id).limit(1).execute().data or [])
+                                        if child: dependencies.append("cra_trial_observations")
+                                    if dependencies:
+                                        st.error(
+                                            "Suppression bloquée : cette donnée possède encore des éléments liés "
+                                            "(" + ", ".join(dependencies) + "). Traitez d’abord ces éléments pour éviter des données orphelines."
+                                        )
+                                    else:
+                                        # Le trigger PostgreSQL écrit l'instantané de suppression dans cra_audit_log.
+                                        _SUPABASE.table(table).delete().eq("id", record_id).execute()
+                                        remaining = (_SUPABASE.table(table).select("id")
+                                                     .eq("id", record_id).limit(1).execute().data or [])
+                                        if remaining:
+                                            st.error("La suppression n’a pas pu être vérifiée. Contactez l’administrateur ; ne répétez pas l’opération sans contrôle.")
+                                        else:
+                                            _SUPABASE.table("cra_audit_log").insert({
+                                                "actor_email": current_email,
+                                                "action": "DELETE_PERMANENT_CONFIRMED",
+                                                "table_name": table,
+                                                "record_id": record_id,
+                                                "before_data": {
+                                                    "label": _label(edit_record),
+                                                    "reason": reason.strip(),
+                                                    "protocol": "backup_downloaded_and_explicit_confirmation",
+                                                },
+                                                "after_data": None,
+                                                "event_at": datetime.utcnow().isoformat(),
+                                            }).execute()
+                                            st.success("Suppression définitive effectuée. L’opération est inscrite au journal d’audit.")
+                                            st.rerun()
+                        except Exception as exc:
+                            st.error(f"Suppression non effectuée ou non vérifiable : {type(exc).__name__}: {exc}")
         else:
             st.info("Aucune fiche modifiable dans cette sélection : seuls les enregistrements dont vous êtes propriétaire sont modifiables.")
 
