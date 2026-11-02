@@ -210,6 +210,24 @@ begin
  values (coalesce(nullif(current_setting('request.jwt.claim.email',true),''),current_user),op,tbl,rec_id,old_payload,new_payload,now());
  if TG_OP='DELETE' then return OLD; else return NEW; end if;
 end; $$;
+
+-- Migration explicite du module Pointage (la table est aussi déclarée dans la liste métier).
+-- Elle reste définie ici pour forcer sa présence et ses droits après mise à jour.
+create table if not exists public.cra_attendance (
+  id text primary key,
+  owner_email text not null default '',
+  payload jsonb not null,
+  created_at timestamptz not null default now()
+);
+create index if not exists cra_attendance_owner_idx on public.cra_attendance(owner_email);
+create index if not exists cra_attendance_created_idx on public.cra_attendance(created_at desc);
+create index if not exists cra_attendance_payload_gin_idx on public.cra_attendance using gin(payload);
+alter table public.cra_attendance enable row level security;
+revoke all on public.cra_attendance from anon, authenticated;
+grant all on public.cra_attendance to service_role;
+drop trigger if exists cra_attendance_audit on public.cra_attendance;
+create trigger cra_attendance_audit after insert or update or delete on public.cra_attendance
+for each row execute function public.cra_audit_records_trigger();
 drop trigger if exists cra_records_audit on public.cra_records;
 create trigger cra_records_audit after insert or update or delete on public.cra_records
 for each row execute function public.cra_audit_records_trigger();
@@ -312,7 +330,7 @@ notify pgrst, 'reload schema';
 """
 
 @st.cache_resource(show_spinner=False)
-def _bootstrap_supabase_schema_once(db_url: str):
+def _bootstrap_supabase_schema_once(db_url: str, schema_version: str = "attendance-v1"):
     """Initialise le schéma une seule fois par processus Streamlit, pas à chaque clic."""
     if not db_url:
         raise RuntimeError(
@@ -327,6 +345,8 @@ def _bootstrap_supabase_schema_once(db_url: str):
     with psycopg.connect(db_url, connect_timeout=8) as conn:
         with conn.cursor() as cur:
             cur.execute(_SCHEMA_SQL)
+    # Laisse PostgREST recharger le schéma après le NOTIFY avant la première lecture.
+    time.sleep(1)
     return True
 
 @st.cache_resource(show_spinner=False)
@@ -337,7 +357,7 @@ if not SUPABASE_SERVICE_ROLE_KEY:
     st.error("Configuration manquante : définissez SUPABASE_SERVICE_ROLE_KEY dans les secrets Streamlit.")
     st.stop()
 try:
-    _bootstrap_supabase_schema_once(SUPABASE_DB_URL)
+    _bootstrap_supabase_schema_once(SUPABASE_DB_URL, "attendance-v2")
     _SUPABASE: Client = _get_supabase_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 except Exception as exc:
     st.error(f"Initialisation Supabase impossible : {exc}")
@@ -1485,7 +1505,13 @@ if page == "Tableau de bord":
 elif page == "Pointage":
     heading("Gestion du personnel", "Pointage journalier", "Définissez les personnes, enregistrez leur présence chaque jour et exportez les relevés par jour ou par mois.")
     attendance_table = "cra_attendance"
-    people = [r for r in db_rows(attendance_table) if r.get("record_type") == "person"]
+    try:
+        attendance_records = db_rows(attendance_table)
+    except Exception as exc:
+        st.error("La table de pointage n’est pas encore accessible dans Supabase. Le schéma vient d’être forcé au démarrage ; actualisez la page dans quelques secondes. Si le problème persiste après redémarrage de l’application, vérifiez l’URI PostgreSQL et les droits de SUPABASE_SERVICE_ROLE_KEY.")
+        st.caption("Le détail de l’erreur est disponible dans les journaux de l’application Streamlit Cloud.")
+        st.stop()
+    people = [r for r in attendance_records if r.get("record_type") == "person"]
     people = sorted(people, key=lambda r: str(r.get("name", "")).casefold())
 
     with st.expander("👤 Définir une personne", expanded=not bool(people)):
@@ -1521,7 +1547,7 @@ elif page == "Pointage":
                 save_attendance = st.form_submit_button("Enregistrer le pointage", type="primary")
             if save_attendance:
                 attendance_person = person_options[attendance_person_label]
-                existing = next((r for r in db_rows(attendance_table) if r.get("record_type") == "entry" and r.get("person_id") == attendance_person["id"] and r.get("day") == attendance_day.isoformat()), None)
+                existing = next((r for r in attendance_records if r.get("record_type") == "entry" and r.get("person_id") == attendance_person["id"] and r.get("day") == attendance_day.isoformat()), None)
                 payload = {"record_type":"entry", "person_id":attendance_person["id"], "person_name":attendance_person.get("name"), "role":attendance_person.get("role", ""), "service":attendance_person.get("service", ""), "day":attendance_day.isoformat(), "status":attendance_status, "time_in":time_in.strftime("%H:%M"), "time_out":time_out.strftime("%H:%M"), "note":attendance_note.strip()}
                 if existing:
                     if db_update(attendance_table, existing["id"], payload): st.success("Le pointage existant a été mis à jour."); st.rerun()
@@ -1532,7 +1558,7 @@ elif page == "Pointage":
     else:
         st.info("Définissez d’abord les personnes concernées pour commencer le pointage.")
 
-    all_entries = [r for r in db_rows(attendance_table) if r.get("record_type") == "entry"]
+    all_entries = [r for r in attendance_records if r.get("record_type") == "entry"]
     st.markdown("#### Exports journaliers et mensuels")
     export_mode = st.radio("Période", ["Journalière", "Mensuelle"], horizontal=True, key="attendance_export_mode")
     if export_mode == "Journalière":
