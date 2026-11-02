@@ -1244,6 +1244,11 @@ else:
         allowed_pages = USER_PAGES[:]
     else:
         allowed_pages = [p for p in USER_PAGES if p in saved_permissions]
+        # La rubrique Pointage a été ajoutée après la création de certains comptes.
+        # On l'ouvre aux comptes qui ont déjà l'accès aux outils de saisie ou d'export.
+        if any(p in saved_permissions for p in ("Fiche technique", "Fiche de mesure", "Données et exports")):
+            if "Pointage" not in allowed_pages:
+                allowed_pages.append("Pointage")
 
     # Aucun droit attribué = aucun module affiché. On ne réactive pas
     # silencieusement des rubriques que l'administrateur aurait désactivées.
@@ -1505,7 +1510,8 @@ elif page == "Pointage":
             st.markdown("#### Enregistrer le pointage")
             with st.form("attendance_daily_form", clear_on_submit=False):
                 a1, a2, a3 = st.columns(3)
-                attendance_person = a1.selectbox("Personne", active_people, format_func=lambda p: f"{p.get('name')} — {p.get('role') or 'Sans fonction'}", key="attendance_person_select")
+                person_options = {f"{p.get('name')} — {p.get('role') or 'Sans fonction'} · {p.get('id', '')[:8]}":p for p in active_people}
+                attendance_person_label = a1.selectbox("Personne", list(person_options), key="attendance_person_select")
                 attendance_day = a2.date_input("Date", value=date.today(), key="attendance_day_input")
                 attendance_status = a3.selectbox("Statut", ["Présent", "Retard", "Absent", "Permission", "Congé", "Mission"])
                 a4, a5, a6 = st.columns(3)
@@ -1514,6 +1520,7 @@ elif page == "Pointage":
                 attendance_note = a6.text_input("Observation")
                 save_attendance = st.form_submit_button("Enregistrer le pointage", type="primary")
             if save_attendance:
+                attendance_person = person_options[attendance_person_label]
                 existing = next((r for r in db_rows(attendance_table) if r.get("record_type") == "entry" and r.get("person_id") == attendance_person["id"] and r.get("day") == attendance_day.isoformat()), None)
                 payload = {"record_type":"entry", "person_id":attendance_person["id"], "person_name":attendance_person.get("name"), "role":attendance_person.get("role", ""), "service":attendance_person.get("service", ""), "day":attendance_day.isoformat(), "status":attendance_status, "time_in":time_in.strftime("%H:%M"), "time_out":time_out.strftime("%H:%M"), "note":attendance_note.strip()}
                 if existing:
