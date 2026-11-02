@@ -224,7 +224,7 @@ begin
     'cra_collaboration','cra_culture_folders','cra_cultures','cra_forms',
     'cra_measurement_drafts','cra_measurement_sheets',
     'cra_phytosanitary_diagnostics','cra_responses','cra_technical_sheets',
-    'cra_trial_observations','cra_trials'
+    'cra_trial_observations','cra_trials','cra_attendance'
   ] loop
     -- Convertit les anciennes tables héritées créées par les versions précédentes.
     if to_regclass(format('public.%I', t)) is not null and exists (
@@ -1215,6 +1215,7 @@ if u3.button("Déconnexion", use_container_width=True):
 # ---------------------------------------------------------------------
 PAGES = [
     "Tableau de bord", "Fiche technique", "Fiche de mesure",
+    "Pointage",
     "Référentiel des cultures", "Essais expérimentaux XXL",
     "Diagnostic phytosanitaire XXL", "Créer un questionnaire",
     "Questionnaires et réponses", "Données et exports",
@@ -1253,7 +1254,7 @@ else:
 
 NAV_GROUPS = {
     "🏠 ACCUEIL": ["Tableau de bord"],
-    "🧾 SAISIE SCIENTIFIQUE": ["Fiche technique", "Fiche de mesure"],
+    "🧾 SAISIE SCIENTIFIQUE": ["Fiche technique", "Fiche de mesure", "Pointage"],
     "🌱 CULTURES & EXPÉRIMENTATION": [
         "Référentiel des cultures", "Essais expérimentaux XXL", "Diagnostic phytosanitaire XXL"
     ],
@@ -1296,6 +1297,7 @@ PAGE_LABELS = {
     "Tableau de bord": "📌 Tableau de bord",
     "Fiche technique": "📝 Fiche technique",
     "Fiche de mesure": "📏 Fiche de mesure",
+    "Pointage": "🕘 Pointage du personnel",
     "Référentiel des cultures": "🌾 Référentiel des cultures",
     "Essais expérimentaux XXL": "🔬 Essais expérimentaux",
     "Diagnostic phytosanitaire XXL": "🩺 Diagnostic phytosanitaire",
@@ -1475,6 +1477,79 @@ if page == "Tableau de bord":
 # ---------------------------------------------------------------------
 # FICHE TECHNIQUE
 # ---------------------------------------------------------------------
+elif page == "Pointage":
+    heading("Gestion du personnel", "Pointage journalier", "Définissez les personnes, enregistrez leur présence chaque jour et exportez les relevés par jour ou par mois.")
+    attendance_table = "cra_attendance"
+    people = [r for r in db_rows(attendance_table) if r.get("record_type") == "person"]
+    people = sorted(people, key=lambda r: str(r.get("name", "")).casefold())
+
+    with st.expander("👤 Définir une personne", expanded=not bool(people)):
+        with st.form("attendance_person_form", clear_on_submit=True):
+            p1, p2, p3 = st.columns(3)
+            person_name = p1.text_input("Nom complet *")
+            person_role = p2.text_input("Fonction / poste")
+            person_service = p3.text_input("Service / équipe")
+            person_active = st.checkbox("Personne active", value=True)
+            save_person = st.form_submit_button("Enregistrer la personne", type="primary")
+        if save_person:
+            if not person_name.strip():
+                st.error("Le nom complet est obligatoire.")
+            elif db_insert(attendance_table, {"record_type":"person", "name":person_name.strip(), "role":person_role.strip(), "service":person_service.strip(), "active":person_active}):
+                st.success("Personne enregistrée."); st.rerun()
+
+    if people:
+        st.markdown("#### Personnes définies")
+        st.dataframe(pd.DataFrame([{"Nom":p.get("name"), "Fonction":p.get("role", ""), "Service":p.get("service", ""), "Active":p.get("active", True)} for p in people]), use_container_width=True, hide_index=True)
+        active_people = [p for p in people if p.get("active", True)]
+        if active_people:
+            st.markdown("#### Enregistrer le pointage")
+            with st.form("attendance_daily_form", clear_on_submit=False):
+                a1, a2, a3 = st.columns(3)
+                attendance_person = a1.selectbox("Personne", active_people, format_func=lambda p: f"{p.get('name')} — {p.get('role') or 'Sans fonction'}", key="attendance_person_select")
+                attendance_day = a2.date_input("Date", value=date.today(), key="attendance_day_input")
+                attendance_status = a3.selectbox("Statut", ["Présent", "Retard", "Absent", "Permission", "Congé", "Mission"])
+                a4, a5, a6 = st.columns(3)
+                time_in = a4.time_input("Heure d’arrivée", value=datetime.strptime("08:00", "%H:%M").time())
+                time_out = a5.time_input("Heure de départ", value=datetime.strptime("17:00", "%H:%M").time())
+                attendance_note = a6.text_input("Observation")
+                save_attendance = st.form_submit_button("Enregistrer le pointage", type="primary")
+            if save_attendance:
+                existing = next((r for r in db_rows(attendance_table) if r.get("record_type") == "entry" and r.get("person_id") == attendance_person["id"] and r.get("day") == attendance_day.isoformat()), None)
+                payload = {"record_type":"entry", "person_id":attendance_person["id"], "person_name":attendance_person.get("name"), "role":attendance_person.get("role", ""), "service":attendance_person.get("service", ""), "day":attendance_day.isoformat(), "status":attendance_status, "time_in":time_in.strftime("%H:%M"), "time_out":time_out.strftime("%H:%M"), "note":attendance_note.strip()}
+                if existing:
+                    if db_update(attendance_table, existing["id"], payload): st.success("Le pointage existant a été mis à jour."); st.rerun()
+                elif db_insert(attendance_table, payload):
+                    st.success("Pointage enregistré."); st.rerun()
+        else:
+            st.info("Aucune personne active. Réactivez ou ajoutez une personne pour saisir un pointage.")
+    else:
+        st.info("Définissez d’abord les personnes concernées pour commencer le pointage.")
+
+    all_entries = [r for r in db_rows(attendance_table) if r.get("record_type") == "entry"]
+    st.markdown("#### Exports journaliers et mensuels")
+    export_mode = st.radio("Période", ["Journalière", "Mensuelle"], horizontal=True, key="attendance_export_mode")
+    if export_mode == "Journalière":
+        export_day = st.date_input("Journée à exporter", value=date.today(), key="attendance_export_day")
+        filtered_entries = [r for r in all_entries if r.get("day") == export_day.isoformat()]
+        period_label = export_day.strftime("%d/%m/%Y")
+        export_suffix = export_day.isoformat()
+    else:
+        export_month = st.date_input("Mois à exporter", value=date.today().replace(day=1), key="attendance_export_month")
+        month_prefix = export_month.strftime("%Y-%m")
+        filtered_entries = [r for r in all_entries if str(r.get("day", "")).startswith(month_prefix)]
+        period_label = export_month.strftime("%m/%Y")
+        export_suffix = month_prefix
+
+    visible_entries = sorted(filtered_entries, key=lambda r: (str(r.get("day", "")), str(r.get("person_name", "")).casefold()))
+    if visible_entries:
+        export_df = pd.DataFrame([{"Date":r.get("day"), "Nom":r.get("person_name"), "Fonction":r.get("role", ""), "Service":r.get("service", ""), "Statut":r.get("status"), "Arrivée":r.get("time_in"), "Départ":r.get("time_out"), "Observation":r.get("note", "")} for r in visible_entries])
+        st.dataframe(export_df, use_container_width=True, hide_index=True)
+        e1, e2 = st.columns(2)
+        e1.download_button("📊 Exporter en Excel", excel_bytes({"Pointages": export_df}), f"pointage_{export_suffix}.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", use_container_width=True)
+        e2.download_button("📄 Exporter en PDF", pdf_bytes(f"Pointage {period_label}", export_df), f"pointage_{export_suffix}.pdf", "application/pdf", use_container_width=True)
+    else:
+        st.info(f"Aucun pointage enregistré pour la période {period_label}.")
+
 elif page == "Fiche technique":
     heading("Recherche agronomique · ISRA / CRA", "FICHE TECHNIQUE D'ESSAI AGRONOMIQUE",
             "Identification, protocole expérimental, calendrier cultural, observations périodiques et validation scientifique.")
@@ -3793,9 +3868,9 @@ elif page == "Gestion des comptes":
                 new_password2 = st.text_input("Confirmer le mot de passe", type="password")
                 new_active = st.checkbox("Compte actif", value=True)
             role_defaults = {
-                "Chercheur": ["Tableau de bord", "Fiche technique", "Fiche de mesure", "Référentiel des cultures", "Essais expérimentaux XXL", "Diagnostic phytosanitaire XXL", "Créer un questionnaire", "Questionnaires et réponses", "Données et exports", "Dossiers de culture", "Collaboration"],
-                "Stagiaire": ["Tableau de bord", "Fiche technique", "Fiche de mesure", "Diagnostic phytosanitaire XXL", "Questionnaires et réponses", "Données et exports", "Dossiers de culture", "Collaboration"],
-                "Technicien": ["Tableau de bord", "Fiche technique", "Fiche de mesure", "Référentiel des cultures", "Diagnostic phytosanitaire XXL", "Questionnaires et réponses", "Données et exports", "Dossiers de culture", "Collaboration"],
+                "Chercheur": ["Tableau de bord", "Fiche technique", "Fiche de mesure", "Pointage", "Référentiel des cultures", "Essais expérimentaux XXL", "Diagnostic phytosanitaire XXL", "Créer un questionnaire", "Questionnaires et réponses", "Données et exports", "Dossiers de culture", "Collaboration"],
+                "Stagiaire": ["Tableau de bord", "Fiche technique", "Fiche de mesure", "Pointage", "Diagnostic phytosanitaire XXL", "Questionnaires et réponses", "Données et exports", "Dossiers de culture", "Collaboration"],
+                "Technicien": ["Tableau de bord", "Fiche technique", "Fiche de mesure", "Pointage", "Référentiel des cultures", "Diagnostic phytosanitaire XXL", "Questionnaires et réponses", "Données et exports", "Dossiers de culture", "Collaboration"],
             }
             # Streamlit exige que chaque valeur de « default » existe dans « options ».
             # On filtre les droits par sécurité et on conserve Collaboration dans les choix.
