@@ -1218,9 +1218,10 @@ PAGES = [
     "Référentiel des cultures", "Essais expérimentaux XXL",
     "Diagnostic phytosanitaire XXL", "Créer un questionnaire",
     "Questionnaires et réponses", "Données et exports",
-    "Dossiers de culture", "Collaboration", "Gestion des comptes",
+    "Dossiers de culture", "Collaboration", "Journal d’audit", "Gestion des comptes",
 ]
-USER_PAGES = [p for p in PAGES if p != "Gestion des comptes"]
+ADMIN_PAGES = ["Journal d’audit", "Gestion des comptes"]
+USER_PAGES = [p for p in PAGES if p not in ADMIN_PAGES]
 
 # Les droits enregistrés par l'administrateur portent sur les sous-onglets.
 # Un grand onglet n'apparaît que s'il contient au moins un sous-onglet autorisé.
@@ -1259,7 +1260,7 @@ NAV_GROUPS = {
     "📋 QUESTIONNAIRES": ["Créer un questionnaire", "Questionnaires et réponses"],
     "📁 DOSSIERS & PARTAGE": ["Dossiers de culture", "Collaboration"],
     "📊 DONNÉES & RAPPORTS": ["Données et exports"],
-    "⚙️ ADMINISTRATION": ["Gestion des comptes"],
+    "⚙️ ADMINISTRATION": ["Journal d’audit", "Gestion des comptes"],
 }
 
 # Filtrage à deux niveaux : les grands onglets et leurs sous-onglets
@@ -1303,6 +1304,7 @@ PAGE_LABELS = {
     "Données et exports": "📊 Données et exports",
     "Dossiers de culture": "📁 Dossiers de culture",
     "Collaboration": "🤝 Collaboration",
+    "Journal d’audit": "🛡️ Journal d’audit quotidien",
     "Gestion des comptes": "🔐 Gestion des comptes",
 }
 
@@ -3657,6 +3659,118 @@ elif page == "Données et exports":
                 answers={labels.get(k,k):v for k,v in r.get("answers_by_id",{}).items()}
             response_records.append({**r,"answers":answers})
         _module_controls("Réponses aux questionnaires", "cra_responses", response_records, "tab_responses", "REPONSES_QUESTIONNAIRES", {"answers":"Grilles réponses","answers_by_id":"Réponses par identifiant"})
+
+# ---------------------------------------------------------------------
+# JOURNAL D’AUDIT QUOTIDIEN — ADMINISTRATEUR UNIQUEMENT
+# ---------------------------------------------------------------------
+elif page == "Journal d’audit":
+    heading(
+        "Journal d’audit quotidien",
+        "Traçabilité active des opérations réalisées sur la plateforme",
+        "Consultation réservée exclusivement à l’administrateur. Les événements sont lus depuis le journal append-only cra_audit_log."
+    )
+    if st.session_state.get("cra_user_role") != "Administrateur des comptes":
+        st.error("Accès refusé : le journal d’audit est strictement réservé à l’administrateur.")
+        st.stop()
+
+    audit_top1, audit_top2, audit_top3 = st.columns([2, 2, 1])
+    with audit_top1:
+        audit_day = st.date_input("Journée à consulter", value=date.today(), key="cra_audit_day")
+    with audit_top2:
+        audit_search = st.text_input("Recherche (utilisateur, action, table ou identifiant)", key="cra_audit_search")
+    with audit_top3:
+        st.write("")
+        if st.button("🔄 Actualiser le journal", type="primary", use_container_width=True, key="cra_audit_refresh"):
+            st.rerun()
+
+    try:
+        audit_response = _SUPABASE.table("cra_audit_log").select(
+            "id,actor_email,action,table_name,record_id,before_data,after_data,event_at"
+        ).order("event_at", desc=True).limit(3000).execute()
+        audit_rows = audit_response.data or []
+        audit_df = pd.DataFrame(audit_rows)
+        if not audit_df.empty:
+            audit_df["event_at"] = pd.to_datetime(audit_df["event_at"], errors="coerce", utc=True)
+            # La date affichée est la date du serveur (UTC), cohérente avec event_at.
+            audit_df["jour_utc"] = audit_df["event_at"].dt.date
+            daily_df = audit_df[audit_df["jour_utc"] == audit_day].copy()
+            if audit_search.strip():
+                search_cols = [c for c in ["actor_email", "action", "table_name", "record_id"] if c in daily_df.columns]
+                mask = daily_df[search_cols].fillna("").astype(str).apply(
+                    lambda col: col.str.contains(audit_search.strip(), case=False, regex=False)
+                ).any(axis=1) if search_cols else pd.Series(False, index=daily_df.index)
+                daily_df = daily_df[mask]
+
+            total_day = int((audit_df["jour_utc"] == audit_day).sum())
+            inserts_day = int(((audit_df["jour_utc"] == audit_day) & audit_df["action"].astype(str).str.upper().str.contains("INSERT|CREATE", regex=True)).sum())
+            updates_day = int(((audit_df["jour_utc"] == audit_day) & audit_df["action"].astype(str).str.upper().str.contains("UPDATE|MODIF", regex=True)).sum())
+            deletes_day = int(((audit_df["jour_utc"] == audit_day) & audit_df["action"].astype(str).str.upper().str.contains("DELETE|SUPPRESS", regex=True)).sum())
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Événements du jour", total_day)
+            m2.metric("Créations", inserts_day)
+            m3.metric("Modifications", updates_day)
+            m4.metric("Suppressions", deletes_day)
+
+            st.markdown(f"### Activité du {audit_day.strftime('%d/%m/%Y')} (UTC)")
+            st.caption(f"{len(daily_df)} événement(s) affiché(s) après filtrage · {len(audit_rows)} événement(s) chargés (maximum 3 000).")
+            if daily_df.empty:
+                st.info("Aucun événement enregistré pour cette journée ou cette recherche.")
+            else:
+                display_df = daily_df.copy()
+                display_df["event_at"] = display_df["event_at"].dt.strftime("%Y-%m-%d %H:%M:%S UTC")
+                display_df["before_data"] = display_df["before_data"].apply(
+                    lambda v: json.dumps(v, ensure_ascii=False, default=str) if v is not None else ""
+                )
+                display_df["after_data"] = display_df["after_data"].apply(
+                    lambda v: json.dumps(v, ensure_ascii=False, default=str) if v is not None else ""
+                )
+                columns_order = [c for c in ["event_at", "actor_email", "action", "table_name", "record_id"] if c in display_df.columns]
+                st.dataframe(
+                    display_df[columns_order].rename(columns={
+                        "event_at": "Date / heure (UTC)", "actor_email": "Utilisateur",
+                        "action": "Opération", "table_name": "Table", "record_id": "Identifiant"
+                    }),
+                    use_container_width=True, hide_index=True
+                )
+                st.markdown("#### 🔎 Détail d’un événement")
+                event_options = daily_df.to_dict("records")
+                selected_event_id = st.selectbox(
+                    "Sélectionner un événement",
+                    options=list(range(len(event_options))),
+                    format_func=lambda i: (
+                        f"#{event_options[i].get('id')} · {event_options[i].get('action')} · "
+                        f"{event_options[i].get('table_name')} · {event_options[i].get('actor_email')}"
+                    ),
+                    key="cra_audit_selected_event"
+                )
+                chosen_event = event_options[selected_event_id]
+                with st.expander("Afficher les données avant / après l’opération", expanded=True):
+                    left, right = st.columns(2)
+                    with left:
+                        st.markdown("**État avant**")
+                        st.json(chosen_event.get("before_data") or {}, expanded=False)
+                    with right:
+                        st.markdown("**État après**")
+                        st.json(chosen_event.get("after_data") or {}, expanded=False)
+                    st.caption(f"Événement n° {chosen_event.get('id')} · {chosen_event.get('event_at')} · {chosen_event.get('record_id')}")
+
+                export_rows = daily_df.copy()
+                export_rows["event_at"] = export_rows["event_at"].astype(str)
+                csv_data = export_rows.drop(columns=["jour_utc"], errors="ignore").to_csv(index=False).encode("utf-8-sig")
+                json_data = json.dumps(
+                    export_rows.drop(columns=["jour_utc"], errors="ignore").to_dict("records"),
+                    ensure_ascii=False, indent=2, default=str
+                ).encode("utf-8")
+                ex1, ex2 = st.columns(2)
+                ex1.download_button("⬇️ Exporter le journal du jour (CSV)", csv_data,
+                    file_name=f"journal_audit_{audit_day.isoformat()}.csv", mime="text/csv", use_container_width=True)
+                ex2.download_button("⬇️ Exporter le journal du jour (JSON)", json_data,
+                    file_name=f"journal_audit_{audit_day.isoformat()}.json", mime="application/json", use_container_width=True)
+        else:
+            st.info("Le journal d’audit ne contient encore aucun événement.")
+    except Exception as audit_exc:
+        st.error(f"Impossible de charger le journal d’audit : {audit_exc}")
+        st.info("Vérifiez que la table cra_audit_log existe et que la connexion Supabase côté serveur dispose des droits de lecture.")
 
 # ---------------------------------------------------------------------
 # GESTION DES COMPTES
