@@ -1069,12 +1069,13 @@ def render_public_form(form_id: str) -> None:
     if form.get("description"):
         st.write(form["description"])
     st.caption("Les champs marqués * sont obligatoires.")
-    st.markdown(f"**Contact :** [{CONTACT_EMAIL}](mailto:{CONTACT_EMAIL})")
+    form_contact_email = str(form.get("contact_email") or CONTACT_EMAIL).strip()
+    st.markdown(f"**Contact :** [{form_contact_email}](mailto:{form_contact_email})")
 
     # Identifiant aléatoire conservé dans la session Streamlit : empêche un second envoi
     # depuis la même session, y compris lorsque le répondant choisit l'anonymat.
     if f"questionnaire_token_{form_id}" not in st.session_state:
-        st.session_state[f"questionnaire_token_{form_id}"] = uuid.uuid.uuid4().hex
+        st.session_state[f"questionnaire_token_{form_id}"] = uuid.uuid4().hex
     respondent_token = st.session_state[f"questionnaire_token_{form_id}"]
     answers_by_id: dict[str, Any] = {}
     answers_by_label: dict[str, Any] = {}
@@ -3031,7 +3032,7 @@ elif page == "Diagnostic phytosanitaire XXL":
 elif page == "Créer un questionnaire":
     heading("Concepteur de formulaires", "Créer et partager un questionnaire",
             "Définissez vous-même les questions, leur type, les choix possibles et les champs obligatoires.")
-    st.caption(f"Contact officiel des questionnaires : {CONTACT_EMAIL}")
+    st.caption(f"Contact par défaut des questionnaires : {CONTACT_EMAIL}. Vous pouvez définir une adresse propre à chaque questionnaire ci-dessous.")
     with st.form("create_form"):
         title = st.text_input("Titre du questionnaire *", placeholder="Ex. : Enquête sur les pratiques culturales")
         description = st.text_area("Description / consignes à afficher aux répondants")
@@ -3055,6 +3056,7 @@ elif page == "Créer un questionnaire":
         )
         active = st.checkbox("Activer immédiatement le questionnaire", value=True)
         allow_anonymous = st.checkbox("Autoriser les réponses anonymes (option au répondant)", value=True, help="Le répondant pourra choisir de ne pas transmettre son nom ni ses coordonnées.")
+        contact_email = st.text_input("E-mail de contact du questionnaire", value=st.session_state.get("questionnaire_contact_email", CONTACT_EMAIL), help="Cette adresse sera affichée aux répondants pour toute question sur le questionnaire.").strip()
         create = st.form_submit_button("Créer le questionnaire et générer son lien", type="primary", use_container_width=True)
     if create:
         qlist = []
@@ -3080,7 +3082,7 @@ elif page == "Créer un questionnaire":
         else:
             fid = uuid.uuid4().hex
             payload = {"id": fid, "title": title.strip(), "description": description,
-                       "questions": qlist, "active": active, "allow_anonymous": allow_anonymous}
+                       "questions": qlist, "active": active, "allow_anonymous": allow_anonymous, "contact_email": contact_email}
             if db_insert("cra_forms", payload):
                 st.session_state["last_created_form"] = fid
                 st.success("Questionnaire créé avec succès.")
