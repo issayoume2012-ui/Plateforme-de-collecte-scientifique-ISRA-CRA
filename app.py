@@ -3231,10 +3231,10 @@ elif page == "Questionnaires et réponses":
             if not series.empty:
                 st.markdown(f"**{question_col}**")
                 counts = series.value_counts().rename_axis("Réponse").reset_index(name="Effectif")
-                if len(counts) <= 20:
-                    st.bar_chart(counts.set_index("Réponse"))
-                else:
-                    st.dataframe(counts.head(20), use_container_width=True, hide_index=True)
+                # Éviter les graphiques Vega-Lite qui peuvent déclencher le chargement
+                # du module frontend ArrowVegaLiteChart (échec dynamique sur certains déploiements).
+                # Le tableau de fréquences reste disponible sans dépendance à ce module.
+                st.dataframe(counts.head(20), use_container_width=True, hide_index=True)
         download_button("Télécharger les réponses (.xlsx)",
             excel_bytes({"Réponses": df}), "CRA_reponses_questionnaires.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
