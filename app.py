@@ -345,8 +345,6 @@ def _bootstrap_supabase_schema_once(db_url: str, schema_version: str = "attendan
     with psycopg.connect(db_url, connect_timeout=8) as conn:
         with conn.cursor() as cur:
             cur.execute(_SCHEMA_SQL)
-    # Laisse PostgREST recharger le schéma après le NOTIFY avant la première lecture.
-    time.sleep(1)
     return True
 
 @st.cache_resource(show_spinner=False)
@@ -357,10 +355,15 @@ if not SUPABASE_SERVICE_ROLE_KEY:
     st.error("Configuration manquante : définissez SUPABASE_SERVICE_ROLE_KEY dans les secrets Streamlit.")
     st.stop()
 try:
-    _bootstrap_supabase_schema_once(SUPABASE_DB_URL, "attendance-v2")
+    # IMPORTANT : ne jamais exécuter les migrations SQL lourdes au démarrage
+    # de chaque instance Streamlit. Les tables sont provisionnées une fois
+    # lors du déploiement. Les migrations restent disponibles en mode explicite.
+    _run_migrations = _config_value("RUN_DB_MIGRATIONS", "false").strip().lower() in {"1", "true", "yes", "oui"}
+    if _run_migrations:
+        _bootstrap_supabase_schema_once(SUPABASE_DB_URL, "attendance-v3")
     _SUPABASE: Client = _get_supabase_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
 except Exception as exc:
-    st.error(f"Initialisation Supabase impossible : {exc}")
+    st.error(f"Connexion Supabase impossible : {exc}")
     st.stop()
 
 class DBResult:
