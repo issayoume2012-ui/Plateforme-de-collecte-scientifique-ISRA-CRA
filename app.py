@@ -1027,6 +1027,12 @@ def _question_options(question: dict) -> list[str]:
     return []
 
 
+@st.cache_data(ttl=45, show_spinner=False)
+def _load_public_questionnaire(form_id: str):
+    """Cache court pour éviter de relire Supabase à chaque rerun du formulaire."""
+    return DB.table("cra_forms").select("*").eq("id", form_id).limit(1).execute().data or []
+
+
 def render_public_form(form_id: str) -> None:
     """Affiche un questionnaire public et enregistre une réponse liée au bon formulaire."""
     form_id = _normalise_form_id(form_id)
@@ -1037,7 +1043,7 @@ def render_public_form(form_id: str) -> None:
         st.stop()
     try:
         # Les tables métier autonomes stockent le document dans payload JSONB.
-        forms = DB.table("cra_forms").select("*").eq("id", form_id).limit(1).execute().data or []
+        forms = _load_public_questionnaire(form_id)
     except Exception as exc:
         st.error(f"Impossible de charger ce questionnaire depuis Supabase : {exc}")
         st.stop()
@@ -1051,6 +1057,9 @@ def render_public_form(form_id: str) -> None:
     if active_value is False or str(active_value).strip().lower() in {"false", "0", "non", "désactivé", "desactive"}:
         st.warning("Ce questionnaire est actuellement désactivé par son créateur.")
         st.stop()
+    if st.session_state.get(f"questionnaire_submitted_{form_id}"):
+        st.success("Votre réponse a déjà été enregistrée. Ce questionnaire est désactivé pour cette session.")
+        st.stop()
     questions = form.get("questions") or []
     if not isinstance(questions, list) or not questions:
         st.error("Ce questionnaire existe, mais aucune question exploitable n'est enregistrée. Modifiez-le ou recréez-le.")
@@ -1062,6 +1071,11 @@ def render_public_form(form_id: str) -> None:
     st.caption("Les champs marqués * sont obligatoires.")
     st.markdown(f"**Contact :** [{CONTACT_EMAIL}](mailto:{CONTACT_EMAIL})")
 
+    # Identifiant aléatoire conservé dans la session Streamlit : empêche un second envoi
+    # depuis la même session, y compris lorsque le répondant choisit l'anonymat.
+    if f"questionnaire_token_{form_id}" not in st.session_state:
+        st.session_state[f"questionnaire_token_{form_id}"] = uuid.uuid.uuid4().hex
+    respondent_token = st.session_state[f"questionnaire_token_{form_id}"]
     answers_by_id: dict[str, Any] = {}
     answers_by_label: dict[str, Any] = {}
     question_labels: dict[str, str] = {}
@@ -1123,6 +1137,7 @@ def render_public_form(form_id: str) -> None:
                 "form_id": form_id,
                 "form_title": str(form.get("title") or "Questionnaire ISRA / CRA"),
                 "anonymous": bool(anonymous),
+                "respondent_token": respondent_token,
                 "respondent": "" if anonymous else respondent.strip(),
                 "contact": "" if anonymous else contact.strip(),
                 # answers conserve le format historique pour les exports existants.
@@ -1133,12 +1148,29 @@ def render_public_form(form_id: str) -> None:
                 "submitted_at": datetime.utcnow().isoformat(timespec="seconds") + "Z",
                 "owner_email": form.get("owner_email", ""),
             }
-            if db_insert("cra_responses", payload):
-                st.success("Votre réponse a bien été enregistrée. Merci pour votre participation.")
-                st.balloons()
-                st.info("Vous pouvez fermer cette page. Votre réponse est transmise au questionnaire correspondant.")
-            else:
-                st.error("La réponse n'a pas pu être enregistrée. Vérifiez votre connexion ou contactez le CRA.")
+            # Contrôle côté serveur avant insertion : une seule réponse par session/répondant.
+            try:
+                prior = DB.table("cra_responses").select("id,respondent_token,respondent,contact").eq("form_id", form_id).execute().data or []
+            except Exception as lookup_error:
+                prior = None
+                st.error(f"Impossible de vérifier si une réponse existe déjà : {lookup_error}")
+            if prior is not None:
+                duplicate = any(
+                    str(row.get("respondent_token") or "") == respondent_token
+                    or (not anonymous and str(row.get("respondent") or "").strip().casefold() == respondent.strip().casefold()
+                        and str(row.get("contact") or "").strip().casefold() == contact.strip().casefold())
+                    for row in prior
+                )
+                if duplicate:
+                    st.warning("Une réponse a déjà été enregistrée pour ce questionnaire depuis cette session ou avec ces coordonnées. Une seule tentative est autorisée.")
+                    st.session_state[f"questionnaire_submitted_{form_id}"] = True
+                elif db_insert("cra_responses", payload):
+                    st.session_state[f"questionnaire_submitted_{form_id}"] = True
+                    _load_public_questionnaire.clear()
+                    st.success("Votre réponse a bien été enregistrée. Merci pour votre participation.")
+                    st.info("Cette session est maintenant désactivée pour ce questionnaire. Vous pouvez fermer cette page.")
+                else:
+                    st.error("La réponse n'a pas pu être enregistrée. Vérifiez votre connexion ou contactez le CRA.")
     st.markdown("---")
     st.caption(f"ISRA · CRA Saint-Louis — Collecte de données pour la recherche agricole. Contact : {CONTACT_EMAIL}")
     st.stop()
