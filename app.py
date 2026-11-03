@@ -498,6 +498,15 @@ def collaboration_permissions():
 def db_rows(table: str, limit: int=5000) -> list[dict]:
     return DB.table(table).select("*").order("created_at",desc=True).limit(limit).execute().data or []
 
+
+@st.cache_data(ttl=30, show_spinner=False)
+def _cached_questionnaire_rows(table: str, owner_email: str, limit: int) -> list[dict]:
+    """Cache court des listes admin pour éviter deux lectures Supabase à chaque rerun.
+
+    owner_email fait partie de la clé afin de ne jamais partager le cache entre comptes.
+    """
+    return db_rows(table, limit)
+
 def culture_catalogue() -> list[str]:
     base = ["Riz", "Tomate", "Maïs", "Oignon", "Canne à sucre", "Niébé", "Mil", "Sorgho", "Pastèque", "Piment", "Aubergine", "Laitue", "Chou", "Autre / saisir"]
     saved = db_rows("cra_cultures", 2000)
@@ -3084,6 +3093,7 @@ elif page == "Créer un questionnaire":
             payload = {"id": fid, "title": title.strip(), "description": description,
                        "questions": qlist, "active": active, "allow_anonymous": allow_anonymous, "contact_email": contact_email}
             if db_insert("cra_forms", payload):
+                _cached_questionnaire_rows.clear()
                 st.session_state["last_created_form"] = fid
                 st.success("Questionnaire créé avec succès.")
                 st.rerun()
@@ -3141,8 +3151,9 @@ elif page == "Créer un questionnaire":
 elif page == "Questionnaires et réponses":
     heading("Administration des enquêtes", "Questionnaires et réponses reçues",
             "Consultez les formulaires créés, activez ou désactivez les liens et exportez les réponses.")
-    forms = db_rows("cra_forms")
-    responses = db_rows("cra_responses")
+    current_owner = str(st.session_state.get("cra_user_email", ""))
+    forms = _cached_questionnaire_rows("cra_forms", current_owner, 1000)
+    responses = _cached_questionnaire_rows("cra_responses", current_owner, 3000)
     public_base = st.text_input(
         "URL publique de cette application",
         value=st.session_state.get("public_base", ""),
@@ -3170,20 +3181,21 @@ elif page == "Questionnaires et réponses":
                     public_link = f"{public_base}/?form={fid}"
                     st.text_input("Lien public du questionnaire", value=public_link, disabled=True, key=f"public_link_display_{fid}")
                     st.link_button("Ouvrir le questionnaire public", public_link, use_container_width=True)
-                    try:
-                        import qrcode
-                        qr_obj = qrcode.QRCode(box_size=8, border=4)
-                        qr_obj.add_data(public_link)
-                        qr_obj.make(fit=True)
-                        qr_img = qr_obj.make_image(fill_color="black", back_color="white")
-                        qr_io = BytesIO(); qr_img.save(qr_io, format="PNG")
-                        qr_data = qr_io.getvalue()
-                        st.image(qr_data, width=210, caption="QR code du lien public")
-                        download_button("Télécharger le QR code", qr_data,
-                            file_name=f"QR_QUESTIONNAIRE_{fid}.png", mime="image/png",
-                            key=f"qr_existing_{fid}", use_container_width=True)
-                    except Exception as qr_error:
-                        st.error(f"QR code indisponible : {type(qr_error).__name__}: {qr_error}")
+                    if st.checkbox("Afficher le QR code", value=False, key=f"show_qr_{fid}"):
+                        try:
+                            import qrcode
+                            qr_obj = qrcode.QRCode(box_size=6, border=3)
+                            qr_obj.add_data(public_link)
+                            qr_obj.make(fit=True)
+                            qr_img = qr_obj.make_image(fill_color="black", back_color="white")
+                            qr_io = BytesIO(); qr_img.save(qr_io, format="PNG")
+                            qr_data = qr_io.getvalue()
+                            st.image(qr_data, width=170, caption="QR code du lien public")
+                            download_button("Télécharger le QR code", qr_data,
+                                file_name=f"QR_QUESTIONNAIRE_{fid}.png", mime="image/png",
+                                key=f"qr_existing_{fid}", use_container_width=True)
+                        except Exception as qr_error:
+                            st.error(f"QR code indisponible : {type(qr_error).__name__}: {qr_error}")
                 elif fid:
                     st.info("Renseignez l'URL publique ci-dessus pour afficher le lien et le QR code de ce questionnaire.")
                 col1, col2 = st.columns(2)
@@ -3191,10 +3203,12 @@ elif page == "Questionnaires et réponses":
                     if form.get("active"):
                         if st.button("Désactiver le lien", key=f"deactivate_{fid}"):
                             db_update("cra_forms", fid, {"active": False})
+                            _cached_questionnaire_rows.clear()
                             st.rerun()
                     else:
                         if st.button("Réactiver le lien", key=f"activate_{fid}"):
                             db_update("cra_forms", fid, {"active": True})
+                            _cached_questionnaire_rows.clear()
                             st.rerun()
                 with col2:
                     n = sum(1 for r in responses if r.get("form_id") == fid)
