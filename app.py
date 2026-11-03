@@ -1066,8 +1066,9 @@ def render_public_form(form_id: str) -> None:
     answers_by_label: dict[str, Any] = {}
     question_labels: dict[str, str] = {}
     with st.form(f"public_form_{form_id}", clear_on_submit=False):
-        respondent = st.text_input("Nom / structure du répondant *", key=f"respondent_{form_id}")
-        contact = st.text_input("Téléphone ou adresse e-mail (facultatif)", key=f"contact_{form_id}")
+        anonymous = st.checkbox("Répondre anonymement (ne pas enregistrer mon nom ni mes coordonnées)", value=False, disabled=not form.get("allow_anonymous", True), key=f"anonymous_{form_id}")
+        respondent = st.text_input("Nom / structure du répondant" + ("" if anonymous else " *"), key=f"respondent_{form_id}", disabled=anonymous)
+        contact = st.text_input("Téléphone ou adresse e-mail (facultatif)", key=f"contact_{form_id}", disabled=anonymous)
         for i, question in enumerate(questions):
             if not isinstance(question, dict):
                 continue
@@ -1101,7 +1102,7 @@ def render_public_form(form_id: str) -> None:
 
     if send:
         missing = []
-        if not respondent.strip():
+        if not anonymous and not respondent.strip():
             missing.append("Nom / structure du répondant")
         for i, question in enumerate(questions):
             if not isinstance(question, dict):
@@ -1121,8 +1122,9 @@ def render_public_form(form_id: str) -> None:
                 "id": uuid.uuid4().hex,
                 "form_id": form_id,
                 "form_title": str(form.get("title") or "Questionnaire ISRA / CRA"),
-                "respondent": respondent.strip(),
-                "contact": contact.strip(),
+                "anonymous": bool(anonymous),
+                "respondent": "" if anonymous else respondent.strip(),
+                "contact": "" if anonymous else contact.strip(),
                 # answers conserve le format historique pour les exports existants.
                 "answers": answers_by_label,
                 # answers_by_id évite les collisions si deux questions ont le même libellé.
@@ -1531,6 +1533,15 @@ elif page == "Pointage":
     if people:
         st.markdown("#### Personnes définies")
         st.dataframe(pd.DataFrame([{"Nom":p.get("name"), "Fonction":p.get("role", ""), "Service":p.get("service", ""), "Active":p.get("active", True)} for p in people]), use_container_width=True, hide_index=True)
+        delete_person_label = st.selectbox("Personne à supprimer", [f"{p.get('name')} · {p.get('id')}" for p in people], key="attendance_delete_person")
+        delete_person_id = delete_person_label.split(" · ")[-1]
+        if st.button("🗑️ Supprimer cette personne et ses pointages", key="attendance_delete_person_btn"):
+            for r in attendance_records:
+                if r.get("person_id") == delete_person_id:
+                    DB.table(attendance_table).delete().eq("id", str(r.get("id"))).execute()
+            DB.table(attendance_table).delete().eq("id", str(delete_person_id)).execute()
+            st.success("Personne et pointages associés supprimés.")
+            st.rerun()
         active_people = [p for p in people if p.get("active", True)]
         if active_people:
             st.markdown("#### Enregistrer le pointage")
@@ -3011,6 +3022,7 @@ elif page == "Créer un questionnaire":
             }, key="question_builder",
         )
         active = st.checkbox("Activer immédiatement le questionnaire", value=True)
+        allow_anonymous = st.checkbox("Autoriser les réponses anonymes (option au répondant)", value=True, help="Le répondant pourra choisir de ne pas transmettre son nom ni ses coordonnées.")
         create = st.form_submit_button("Créer le questionnaire et générer son lien", type="primary", use_container_width=True)
     if create:
         qlist = []
@@ -3036,7 +3048,7 @@ elif page == "Créer un questionnaire":
         else:
             fid = uuid.uuid4().hex
             payload = {"id": fid, "title": title.strip(), "description": description,
-                       "questions": qlist, "active": active}
+                       "questions": qlist, "active": active, "allow_anonymous": allow_anonymous}
             if db_insert("cra_forms", payload):
                 st.session_state["last_created_form"] = fid
                 st.success("Questionnaire créé avec succès.")
@@ -3176,6 +3188,19 @@ elif page == "Questionnaires et réponses":
             display.append(row)
         df = pd.DataFrame(display)
         st.dataframe(df, use_container_width=True, hide_index=True)
+        st.markdown("### Analyse du questionnaire sélectionné")
+        st.metric("Nombre de réponses", len(filtered))
+        answer_columns = [c for c in df.columns if c not in {"Questionnaire", "Répondant", "Contact", "Date"}]
+        for question_col in answer_columns:
+            series = df[question_col].dropna().astype(str)
+            series = series[series.str.strip() != ""]
+            if not series.empty:
+                st.markdown(f"**{question_col}**")
+                counts = series.value_counts().rename_axis("Réponse").reset_index(name="Effectif")
+                if len(counts) <= 20:
+                    st.bar_chart(counts.set_index("Réponse"))
+                else:
+                    st.dataframe(counts.head(20), use_container_width=True, hide_index=True)
         download_button("Télécharger les réponses (.xlsx)",
             excel_bytes({"Réponses": df}), "CRA_reponses_questionnaires.xlsx",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
