@@ -15,7 +15,6 @@ Lancez avec : streamlit run app.py
 from __future__ import annotations
 
 import json
-import base64
 import re
 import uuid
 import hashlib
@@ -1405,6 +1404,37 @@ page = st.radio(
     label_visibility="collapsed",
 )
 
+# Le dossier de classement est sélectionnable depuis chaque sous-onglet.
+# Les formulaires existants reprennent automatiquement ce choix à l'insertion.
+available_work_folders = db_rows("cra_culture_folders", 3000)
+folder_choices = {"— Sans dossier —": None}
+for _folder in available_work_folders:
+    _folder_title = _folder.get("folder_name") or _folder.get("name") or "Dossier sans nom"
+    _folder_label = f"{_folder_title} · {str(_folder.get('id', ''))[:8]}"
+    folder_choices[_folder_label] = _folder
+_active_folder_now = st.session_state.get("cra_active_workspace_folder") or {}
+_active_folder_label = next(
+    (label for label, folder in folder_choices.items() if folder and folder.get("id") == _active_folder_now.get("id")),
+    "— Sans dossier —",
+)
+if page == "Mes dossiers" and _active_folder_label != "— Sans dossier —":
+    st.session_state["cra_active_folder_global"] = _active_folder_label
+elif "cra_active_folder_global" not in st.session_state:
+    st.session_state["cra_active_folder_global"] = _active_folder_label
+elif st.session_state.get("cra_active_folder_global") not in folder_choices:
+    st.session_state["cra_active_folder_global"] = _active_folder_label
+st.selectbox(
+    "Dossier de classement pour les nouvelles saisies",
+    list(folder_choices),
+    key="cra_active_folder_global",
+    help="Disponible dans tous les sous-onglets. Les nouvelles fiches et données seront classées dans le dossier choisi.",
+)
+_chosen_folder = folder_choices.get(st.session_state.get("cra_active_folder_global"))
+if _chosen_folder:
+    st.session_state["cra_active_workspace_folder"] = _chosen_folder
+else:
+    st.session_state.pop("cra_active_workspace_folder", None)
+
 st.markdown("""
 <style>
 /* Grands onglets : bandeau supérieur, larges cartes cliquables */
@@ -1615,86 +1645,71 @@ elif page == "Mes dossiers":
         active_workspace_folder = st.session_state.get("cra_active_workspace_folder") or {}
         if active_workspace_folder:
             st.success(f"Dossier ouvert : {active_workspace_folder.get('folder_name') or active_workspace_folder.get('name')} · les nouvelles saisies seront classées ici.")
-            st.markdown("#### 📎 Fichiers du dossier")
-            uploaded_files = st.file_uploader(
-                "Ajouter des fichiers à ce dossier",
-                accept_multiple_files=True,
-                key=f"cra_workspace_upload_{active_workspace_folder.get('id')}"
-            )
-            if uploaded_files and st.button("Enregistrer les fichiers dans le dossier", type="primary", key="cra_workspace_save_files"):
-                stored_files = list(active_workspace_folder.get("files") or [])
-                for uploaded_file in uploaded_files:
-                    file_bytes = uploaded_file.getvalue()
-                    stored_files.append({
-                        "name": uploaded_file.name,
-                        "mime": uploaded_file.type or "application/octet-stream",
-                        "size": len(file_bytes),
-                        "data_base64": base64.b64encode(file_bytes).decode("ascii"),
-                    })
-                try:
-                    DB.table("cra_culture_folders").update({"files": stored_files}).eq("id", active_workspace_folder.get("id")).execute()
-                    st.session_state["cra_active_workspace_folder"] = {**active_workspace_folder, "files": stored_files}
-                    st.success(f"{len(uploaded_files)} fichier(s) enregistré(s) dans le dossier.")
-                    st.rerun()
-                except Exception as exc:
-                    st.error(f"Enregistrement des fichiers impossible : {exc}")
-
-            folder_files = active_workspace_folder.get("files") or []
-            if folder_files:
-                for file_index, file_item in enumerate(folder_files):
+            st.markdown("#### 🔗 Liens et ressources du dossier")
+            with st.form(f"cra_workspace_link_form_{active_workspace_folder.get('id')}", clear_on_submit=True):
+                resource_name = st.text_input("Nom du fichier ou de la ressource *", placeholder="Ex. : Protocole expérimental")
+                resource_url = st.text_input("Lien de partage *", placeholder="https://…")
+                resource_note = st.text_input("Description (facultatif)")
+                save_resource = st.form_submit_button("🔗 Ajouter le lien au dossier", type="primary")
+            if save_resource:
+                if not resource_name.strip() or not re.match(r"^https?://", resource_url.strip(), flags=re.I):
+                    st.error("Indiquez un nom et un lien commençant par http:// ou https://.")
+                else:
+                    resources = list(active_workspace_folder.get("resources") or [])
+                    resources.append({"name": resource_name.strip(), "url": resource_url.strip(), "note": resource_note.strip(), "added_at": datetime.utcnow().isoformat()})
                     try:
-                        file_content = base64.b64decode(file_item.get("data_base64", ""))
-                        st.download_button(
-                            f"⬇️ {file_item.get('name', 'Fichier')}",
-                            data=file_content,
-                            file_name=file_item.get("name", "fichier"),
-                            mime=file_item.get("mime", "application/octet-stream"),
-                            key=f"cra_workspace_file_{active_workspace_folder.get('id')}_{file_index}",
-                        )
+                        DB.table("cra_culture_folders").update({"resources": resources}).eq("id", active_workspace_folder.get("id")).execute()
+                        st.session_state["cra_active_workspace_folder"] = {**active_workspace_folder, "resources": resources}
+                        st.success("Lien ajouté au dossier.")
+                        st.rerun()
                     except Exception as exc:
-                        st.error(f"Fichier illisible ({file_item.get('name', 'sans nom')}) : {exc}")
-                zip_buffer = BytesIO()
-                try:
-                    with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zip_archive:
-                        for file_item in folder_files:
-                            zip_archive.writestr(f"fichiers/{file_item.get('name', 'fichier')}", base64.b64decode(file_item.get("data_base64", "")))
-                        archive_tables = [
-                            "cra_technical_sheets", "cra_measurement_sheets", "cra_attendance",
-                            "cra_trials", "cra_trial_observations", "cra_phytosanitary_diagnostics",
-                            "cra_forms", "cra_responses", "cra_collaboration",
-                        ]
-                        for archive_table in archive_tables:
-                            try:
-                                archive_rows = [
-                                    row for row in db_rows(archive_table, 5000)
-                                    if str(row.get("folder_id", "")) == str(active_workspace_folder.get("id"))
-                                ]
-                            except Exception:
-                                archive_rows = []
-                            if archive_rows:
-                                zip_archive.writestr(
-                                    f"donnees/{archive_table}.json",
-                                    json.dumps(archive_rows, ensure_ascii=False, indent=2, default=str).encode("utf-8")
-                                )
-                                zip_archive.writestr(
-                                    f"donnees/{archive_table}.csv",
-                                    pd.DataFrame(archive_rows).to_csv(index=False).encode("utf-8-sig")
-                                )
-                    st.download_button(
-                        "📦 Télécharger le dossier complet (.zip)",
-                        data=zip_buffer.getvalue(),
-                        file_name=f"{slugify(active_workspace_folder.get('folder_name') or 'dossier')}_fichiers.zip",
-                        mime="application/zip",
-                        key=f"cra_workspace_zip_{active_workspace_folder.get('id')}",
-                    )
-                except Exception as exc:
-                    st.error(f"Création du ZIP impossible : {exc}")
-            else:
-                st.info("Aucun fichier joint à ce dossier pour le moment.")
-            if st.button("Fermer le dossier", key="cra_workspace_close"):
-                st.session_state.pop("cra_active_workspace_folder", None)
-                st.rerun()
+                        st.error(f"Enregistrement du lien impossible : {exc}")
 
+            folder_resources = active_workspace_folder.get("resources") or []
+            if folder_resources:
+                for resource_index, resource in enumerate(folder_resources):
+                    st.markdown(f"**{resource.get('name', 'Ressource')}** · {resource.get('note', '')}")
+                    st.link_button("Ouvrir la ressource", resource.get("url", "#"), key=f"cra_workspace_resource_{active_workspace_folder.get('id')}_{resource_index}")
+            else:
+                st.info("Aucun lien ajouté à ce dossier pour le moment.")
+            st.caption("Le ZIP exporte les liens enregistrés et les données classées dans ce dossier, sans copier les fichiers hébergés ailleurs.")
+            zip_buffer = BytesIO()
+            try:
+                with zipfile.ZipFile(zip_buffer, "w", compression=zipfile.ZIP_DEFLATED) as zip_archive:
+                    if folder_resources:
+                        zip_archive.writestr("liens_et_ressources.json", json.dumps(folder_resources, ensure_ascii=False, indent=2).encode("utf-8"))
+                        zip_archive.writestr("liens_et_ressources.csv", pd.DataFrame(folder_resources).to_csv(index=False).encode("utf-8-sig"))
+                    archive_tables = [
+                        "cra_technical_sheets", "cra_measurement_sheets", "cra_attendance",
+                        "cra_trials", "cra_trial_observations", "cra_phytosanitary_diagnostics",
+                        "cra_forms", "cra_responses", "cra_collaboration",
+                    ]
+                    for archive_table in archive_tables:
+                        try:
+                            archive_rows = [
+                                row for row in db_rows(archive_table, 5000)
+                                if str(row.get("folder_id", "")) == str(active_workspace_folder.get("id"))
+                            ]
+                        except Exception:
+                            archive_rows = []
+                        if archive_rows:
+                            zip_archive.writestr(
+                                f"donnees/{archive_table}.json",
+                                json.dumps(archive_rows, ensure_ascii=False, indent=2, default=str).encode("utf-8")
+                            )
+                            zip_archive.writestr(
+                                f"donnees/{archive_table}.csv",
+                                pd.DataFrame(archive_rows).to_csv(index=False).encode("utf-8-sig")
+                            )
+                st.download_button(
+                    "📦 Télécharger le dossier complet (.zip)",
+                    data=zip_buffer.getvalue(),
+                    file_name=f"{slugify(active_workspace_folder.get('folder_name') or 'dossier')}_dossier.zip",
+                    mime="application/zip",
+                    key=f"cra_workspace_zip_{active_workspace_folder.get('id')}",
+                )
+            except Exception as exc:
+                st.error(f"Création du ZIP impossible : {exc}")
             workspace_modules = [
                 ("Fiches techniques", "cra_technical_sheets"),
                 ("Fiches de mesure", "cra_measurement_sheets"),
