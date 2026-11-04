@@ -430,6 +430,12 @@ class SupabaseQuery:
             return DBResult(q.execute().data)
         if self.action == "insert":
             row=dict(self.payload); row.setdefault("id",str(uuid.uuid4())); row.setdefault("created_at",datetime.utcnow().isoformat())
+            # Toute nouvelle saisie est classée dans le dossier actif, sauf
+            # les dossiers eux-mêmes et les invitations de collaboration.
+            active_folder = st.session_state.get("cra_active_workspace_folder")
+            if active_folder and self.table not in {"cra_culture_folders", "cra_collaboration"}:
+                row.setdefault("folder_id", active_folder.get("id"))
+                row.setdefault("folder_name", active_folder.get("folder_name", ""))
             stored={"id":str(row["id"]),"owner_email":row.get("owner_email",""),"payload":row,"created_at":row["created_at"]}
             _SUPABASE.table(self.table).insert(stored).execute()
             self._audit("INSERT",row["id"],after=row); return DBResult([row])
@@ -1281,7 +1287,7 @@ if u3.button("Déconnexion", use_container_width=True):
 # NAVIGATION — GRANDS ONGLET EN HAUT / SOUS-ONGLETS EN DESSOUS
 # ---------------------------------------------------------------------
 PAGES = [
-    "Tableau de bord", "Fiche technique", "Fiche de mesure",
+    "Tableau de bord", "Mes dossiers", "Fiche technique", "Fiche de mesure",
     "Pointage",
     "Référentiel des cultures", "Essais expérimentaux XXL",
     "Diagnostic phytosanitaire XXL", "Créer un questionnaire",
@@ -1311,6 +1317,11 @@ else:
         allowed_pages = USER_PAGES[:]
     else:
         allowed_pages = [p for p in USER_PAGES if p in saved_permissions]
+        # L'espace de dossiers complète l'accueil pour les comptes ayant accès
+        # à au moins un module de travail, y compris les comptes déjà créés.
+        if any(p in allowed_pages for p in USER_PAGES if p != "Mes dossiers"):
+            if "Mes dossiers" not in allowed_pages:
+                allowed_pages.insert(0, "Mes dossiers")
         # La rubrique Pointage a été ajoutée après la création de certains comptes.
         # On l'ouvre aux comptes qui ont déjà l'accès aux outils de saisie ou d'export.
         if any(p in saved_permissions for p in ("Fiche technique", "Fiche de mesure", "Données et exports")):
@@ -1325,7 +1336,7 @@ else:
         st.stop()
 
 NAV_GROUPS = {
-    "🏠 ACCUEIL": ["Tableau de bord"],
+    "🏠 ACCUEIL": ["Tableau de bord", "Mes dossiers"],
     "🧾 SAISIE SCIENTIFIQUE": ["Fiche technique", "Fiche de mesure", "Pointage"],
     "🌱 CULTURES & EXPÉRIMENTATION": [
         "Référentiel des cultures", "Essais expérimentaux XXL", "Diagnostic phytosanitaire XXL"
@@ -1367,6 +1378,7 @@ if st.session_state.get("cra_nav_page") not in page_options:
 
 PAGE_LABELS = {
     "Tableau de bord": "📌 Tableau de bord",
+    "Mes dossiers": "📁 Mes dossiers",
     "Fiche technique": "📝 Fiche technique",
     "Fiche de mesure": "📏 Fiche de mesure",
     "Pointage": "🕘 Pointage du personnel",
@@ -1545,6 +1557,115 @@ if page == "Tableau de bord":
         st.info("Aucune donnée enregistrée pour le moment.")
     st.markdown("</div>", unsafe_allow_html=True)
     st.info("Utilisez les modules ci-dessus pour saisir les fiches ou créer un questionnaire accessible par lien.")
+
+elif page == "Mes dossiers":
+    heading(
+        "Accueil · classement général",
+        "Mes dossiers de travail",
+        "Créez un dossier, ouvrez-le, puis utilisez les modules habituels : les nouvelles saisies y seront automatiquement classées."
+    )
+    workspace_folders = db_rows("cra_culture_folders", 3000)
+    with st.expander("＋ Créer un dossier de travail", expanded=not bool(workspace_folders)):
+        with st.form("create_workspace_folder", clear_on_submit=True):
+            wf1, wf2 = st.columns(2)
+            with wf1:
+                workspace_name = st.text_input("Nom du dossier *", placeholder="Ex. : Campagne riz 2026")
+                workspace_culture = st.text_input("Thème / culture", placeholder="Ex. : Riz, suivi du personnel, enquête…")
+            with wf2:
+                workspace_campaign = st.text_input("Campagne / période", str(date.today().year))
+                workspace_station = st.text_input("Site / station")
+            workspace_description = st.text_area("Description / objectif")
+            create_workspace = st.form_submit_button("📁 Créer le dossier", type="primary", use_container_width=True)
+        if create_workspace:
+            if not workspace_name.strip():
+                st.error("Le nom du dossier est obligatoire.")
+            else:
+                created_folder = {
+                    "folder_name": workspace_name.strip(),
+                    "culture": workspace_culture.strip() or "Dossier général",
+                    "campaign": workspace_campaign.strip(),
+                    "station": workspace_station.strip(),
+                    "description": workspace_description.strip(),
+                    "responsible": st.session_state.get("cra_user_email", ""),
+                    "owner_email": st.session_state.get("cra_user_email", ""),
+                    "folder_type": "workspace",
+                }
+                if db_insert("cra_culture_folders", created_folder):
+                    st.success("Dossier créé.")
+                    st.rerun()
+
+    workspace_folders = db_rows("cra_culture_folders", 3000)
+    if not workspace_folders:
+        st.info("Créez un dossier pour commencer à classer vos saisies.")
+    else:
+        folder_labels = {
+            f"{f.get('folder_name') or f.get('name') or 'Dossier sans nom'} · {f.get('culture') or 'Général'} · {str(f.get('id',''))[:8]}": f
+            for f in workspace_folders
+        }
+        current_folder = st.session_state.get("cra_active_workspace_folder") or {}
+        default_label = next((label for label, f in folder_labels.items() if f.get("id") == current_folder.get("id")), next(iter(folder_labels)))
+        selected_folder_label = st.selectbox("Choisir un dossier à ouvrir", list(folder_labels), index=list(folder_labels).index(default_label), key="cra_workspace_folder_select")
+        selected_workspace_folder = folder_labels[selected_folder_label]
+        if st.button("📂 Ouvrir ce dossier", type="primary", use_container_width=False):
+            st.session_state["cra_active_workspace_folder"] = selected_workspace_folder
+            st.rerun()
+        if st.session_state.get("cra_active_workspace_folder", {}).get("id") == selected_workspace_folder.get("id"):
+            st.session_state["cra_active_workspace_folder"] = selected_workspace_folder
+        active_workspace_folder = st.session_state.get("cra_active_workspace_folder") or {}
+        if active_workspace_folder:
+            st.success(f"Dossier ouvert : {active_workspace_folder.get('folder_name') or active_workspace_folder.get('name')} · les nouvelles saisies seront classées ici.")
+            if st.button("Fermer le dossier", key="cra_workspace_close"):
+                st.session_state.pop("cra_active_workspace_folder", None)
+                st.rerun()
+
+            workspace_modules = [
+                ("Fiches techniques", "cra_technical_sheets"),
+                ("Fiches de mesure", "cra_measurement_sheets"),
+                ("Pointages", "cra_attendance"),
+                ("Essais expérimentaux", "cra_trials"),
+                ("Observations d’essais", "cra_trial_observations"),
+                ("Diagnostics phytosanitaires", "cra_phytosanitary_diagnostics"),
+                ("Questionnaires", "cra_forms"),
+                ("Réponses aux questionnaires", "cra_responses"),
+                ("Collaboration", "cra_collaboration"),
+            ]
+            for module_label, module_table in workspace_modules:
+                try:
+                    module_all_rows = db_rows(module_table, 5000)
+                    module_rows = [r for r in module_all_rows if str(r.get("folder_id", "")) == str(active_workspace_folder.get("id"))]
+                except Exception:
+                    module_all_rows = []
+                    module_rows = []
+                with st.expander(f"{module_label} · {len(module_rows)} élément(s)", expanded=False):
+                    if module_rows:
+                        summary_rows = []
+                        for row in module_rows:
+                            summary_rows.append({
+                                "Identifiant": str(row.get("id", ""))[:12],
+                                "Nom / objet": row.get("title") or row.get("name") or row.get("culture") or row.get("form_title") or row.get("record_type") or row.get("code") or "—",
+                                "Date": row.get("created_at") or row.get("date") or row.get("submitted_at") or "",
+                            })
+                        st.dataframe(pd.DataFrame(summary_rows), use_container_width=True, hide_index=True)
+                    else:
+                        st.caption("Aucune donnée classée dans ce module pour ce dossier.")
+                    movable_rows = [r for r in module_all_rows if str(r.get("folder_id", "")) != str(active_workspace_folder.get("id"))]
+                    if movable_rows:
+                        st.markdown("**Classer une donnée existante dans ce dossier**")
+                        movable_labels = {
+                            f"{r.get('title') or r.get('name') or r.get('culture') or r.get('form_title') or r.get('record_type') or r.get('code') or 'Élément'} · {str(r.get('id',''))[:8]}": r
+                            for r in movable_rows
+                        }
+                        move_label = st.selectbox("Donnée à classer", list(movable_labels), key=f"cra_move_{module_table}")
+                        if st.button("Classer dans ce dossier", key=f"cra_move_btn_{module_table}"):
+                            try:
+                                DB.table(module_table).update({
+                                    "folder_id": active_workspace_folder.get("id"),
+                                    "folder_name": active_workspace_folder.get("folder_name") or active_workspace_folder.get("name", ""),
+                                }).eq("id", movable_labels[move_label].get("id")).execute()
+                                st.success("Donnée classée dans le dossier.")
+                                st.rerun()
+                            except Exception as exc:
+                                st.error(f"Classement impossible : {exc}")
 
 # ---------------------------------------------------------------------
 # FICHE TECHNIQUE
