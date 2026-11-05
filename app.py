@@ -941,12 +941,19 @@ def _normalize_grid_rows(value: Any) -> list[dict]:
     """Normalise les grilles natives, JSON et anciens formats tabulaires."""
     if value is None:
         return []
+    if isinstance(value, (bytes, bytearray)):
+        try:
+            value = value.decode("utf-8-sig")
+        except Exception:
+            return []
     if isinstance(value, str):
         raw = value.strip()
         if not raw:
             return []
         try:
             value = json.loads(raw)
+            if isinstance(value, str) and value.strip() != raw:
+                return _normalize_grid_rows(value)
         except Exception:
             try:
                 from io import StringIO
@@ -975,6 +982,34 @@ def _normalize_grid_rows(value: Any) -> list[dict]:
                                                  {k:v for k,v in row.items() if k not in names})
                         return converted
                     return parsed
+        # Certains anciens enregistrements stockent une grille en format
+        # colonne : {"Date": [..], "Mesure": [..]}. Le format orient="records"
+        # utilisé par les nouveaux formulaires est déjà traité plus bas.
+        column_values = {
+            str(key): item for key, item in value.items()
+            if isinstance(item, (list, tuple))
+        }
+        if column_values and len(column_values) == len(value):
+            row_count = max((len(items) for items in column_values.values()), default=0)
+            if row_count:
+                return [
+                    {column: (items[row_index] if row_index < len(items) else "")
+                     for column, items in column_values.items()}
+                    for row_index in range(row_count)
+                ]
+        # Certains systèmes stockent la matrice sous {headers: [...], data: [[...]]}.
+        if isinstance(headers, (list, tuple)):
+            matrix = value.get("data") or value.get("rows") or value.get("values")
+            if isinstance(matrix, (list, tuple)):
+                converted = []
+                for row in matrix:
+                    if isinstance(row, dict):
+                        converted.append({str(k): v for k, v in row.items()})
+                    elif isinstance(row, (list, tuple)):
+                        converted.append({str(headers[i]): row[i] if i < len(row) else ""
+                                          for i in range(len(headers))})
+                if converted:
+                    return converted
         if all(not isinstance(v, (dict, list, tuple)) for v in value.values()):
             return [value]
         return []
@@ -3505,24 +3540,40 @@ elif page == "Données et exports":
         return _normalize_grid_rows(value)
 
     def _record_grid(record, field):
-        """Récupère une grille depuis la fiche, payload JSON ou alias historique."""
+        """Récupère une grille depuis une fiche, un brouillon ou un payload historique."""
         aliases = {
             "observations_periodiques": ("observations_periodiques", "observations_periodiques_json",
-                                         "technical_grid", "grid", "rows"),
-            "grid": ("grid", "measurement_grid", "grille", "mesures", "rows", "data"),
+                                         "technical_grid", "technical_observations", "grid", "rows"),
+            "grid": ("grid", "measurement_grid", "measurement_rows", "measurements", "grille", "mesures", "rows", "data"),
         }
         candidates = [field] + [x for x in aliases.get(field, ()) if x != field]
-        sources = [record]
-        payload = record.get("payload")
-        if isinstance(payload, str):
-            try: payload = json.loads(payload)
-            except Exception: payload = None
-        if isinstance(payload, dict):
-            sources.append(payload)
+        # Les versions précédentes ont parfois enveloppé les valeurs dans
+        # payload, draft_data, metadata ou form_data. Parcours borné pour ne
+        # pas interpréter les cellules arbitraires comme des grilles.
+        sources = []
+        queue = [(record, 0)]
+        seen = set()
+        while queue:
+            source, depth = queue.pop(0)
+            if not isinstance(source, dict) or id(source) in seen:
+                continue
+            seen.add(id(source))
+            sources.append(source)
+            if depth >= 4:
+                continue
+            for nested_key in ("payload", "draft_data", "metadata", "form_data", "data"):
+                nested = source.get(nested_key)
+                if isinstance(nested, str):
+                    try:
+                        nested = json.loads(nested)
+                    except Exception:
+                        continue
+                if isinstance(nested, dict):
+                    queue.append((nested, depth + 1))
         for source in sources:
             for key in candidates:
                 value = source.get(key) if isinstance(source, dict) else None
-                if value is not None and value != "":
+                if value is not None and not (isinstance(value, str) and not value.strip()):
                     rows = _as_rows(value)
                     if rows:
                         return rows
